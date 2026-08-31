@@ -6,7 +6,8 @@ credentials-*
 .gh-config/
 
 # editor / os
-.vscode/
+.vscode/*
+!.vscode/settings.json
 .DS_Store
 Thumbs.db
 

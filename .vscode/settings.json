@@ -1,0 +1,9 @@
+{
+  "// note": "Keeps this folder pinned to the JaswanthTech99 account. Without these, VS Code can inject its own signed-in GitHub session (JaswanthTilli) into git operations.",
+  "github.gitAuthentication": false,
+  "git.terminalAuthentication": false,
+  "git.useIntegratedAskPass": false,
+  "git.autofetch": false,
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true
+}
