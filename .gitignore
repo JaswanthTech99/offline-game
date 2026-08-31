@@ -1,0 +1,17 @@
+# credentials / secrets
+credentials-*
+*.token
+.env
+.env.*
+.gh-config/
+
+# editor / os
+.vscode/
+.DS_Store
+Thumbs.db
+
+# node
+node_modules/
+dist/
+build/
+*.log
