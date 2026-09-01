@@ -263,11 +263,14 @@
   inset: 0;
   pointer-events: none;
   background: radial-gradient(
-    ellipse 66% 70% at 50% 47%,
+    /* Radii deliberately under 2/3: an ellipse sized to the frame leaves the mid-edges
+       (top-centre, left-centre) inside the transparent zone, which is what held the edge
+       band at 7% while the corners were already black. */
+    ellipse 58% 60% at 50% 47%,
     transparent 0%,
-    transparent 58%,
-    rgb(0 0 0 / 0.55) 78%,
-    rgb(0 0 0 / 0.95) 92%,
+    transparent 72%,
+    rgb(0 0 0 / 0.52) 84%,
+    rgb(0 0 0 / 0.96) 92%,
     rgb(0 0 0 / 1) 100%
   );
 }
@@ -276,12 +279,12 @@
   /* Ellipse, not farthest-side: on 16:9 a circular stop reaches the short edge first and
      crushes top and bottom while the sides stay lit. Separate radii track the frame. */
   background: radial-gradient(
-    ellipse 70% 74% at 50% 47%,
+    ellipse 60% 62% at 50% 47%,
     transparent 0%,
-    transparent 52%,
-    rgb(3 5 9 / 0.34) 72%,
-    rgb(1 2 4 / 0.90) 88%,
-    rgb(0 0 0 / 1) 97%
+    transparent 72%,
+    rgb(3 5 9 / 0.38) 84%,
+    rgb(1 2 4 / 0.92) 90%,
+    rgb(0 0 0 / 1) 100%
   );
   opacity: var(--fx-vignette);
 }

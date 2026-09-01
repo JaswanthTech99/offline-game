@@ -39,6 +39,8 @@ function makeField(theme: UniverseTheme, ringBudget: number): Playfield {
     ringBudget,
     glass: GLASS_NONE,
     caustics: false,
+    maxShards: 256,
+    dustCount: 8,
     events: {
       onBallsChanged: () => {},
       onScoreChanged: () => {},

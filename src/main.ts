@@ -40,7 +40,7 @@
 import './styles/tokens.css';
 import './styles/app.css';
 
-import { Color, PerspectiveCamera, Scene } from 'three/webgpu';
+import { Color, PerspectiveCamera, Scene, Vector2 } from 'three/webgpu';
 
 import { probeCaps } from './core/Caps';
 import { collectDiagnostics, reportDiagnostics } from './core/Diagnostics';
@@ -280,24 +280,14 @@ async function boot(shell: Shell): Promise<App> {
   const forceWebGL = params.get('webgl') === '1';
   // Built conditionally rather than with `forceWebGL: undefined`: exactOptionalPropertyTypes
   // is on, so an explicitly-undefined optional is not the same as an absent one.
+  const rawScale = Number.parseFloat(params.get('scale') ?? '');
+  const scaleOverride = Number.isFinite(rawScale) && rawScale > 0 ? rawScale : undefined;
   const engineOptions: EngineOptions = forceWebGL
-    ? { canvas: shell.canvas, tierOverride, forceWebGL: true }
-    : { canvas: shell.canvas, tierOverride };
+    ? { canvas: shell.canvas, tierOverride, forceWebGL: true, scaleOverride }
+    : { canvas: shell.canvas, tierOverride, scaleOverride };
   const engine = await Engine.create(engineOptions);
 
   const quality = engine.quality;
-
-  // Printed before anything else can be blamed on the renderer. `tierOverride` is the
-  // authority on the source: resolveTier takes `override ?? detectTier(caps)`, so a
-  // non-null override means detectTier never ran.
-  reportDiagnostics(
-    collectDiagnostics(
-      engine.caps,
-      quality,
-      tierOverride === null ? 'detected' : 'override',
-      engine.renderScale,
-    ),
-  );
 
   root.dataset['preset'] = presetFor(quality.graphics);
   // The preset axis is image quality; this one is movement. core/Quality.ts keeps them
@@ -352,6 +342,8 @@ async function boot(shell: Shell): Promise<App> {
     theme,
     seed: seedFrom(params),
     ringBudget: quality.budget.corridorRings,
+    maxShards: quality.budget.maxShardsLive,
+    dustCount: quality.budget.dustSprites,
     // ?glass=off is the A/B control for the optical pass; anything else takes the tier's row.
     glass: params.get('glass') === 'off'
       ? { fresnel: false, bevel: false, refraction: false, streak: false, microNoise: false }
@@ -387,6 +379,32 @@ async function boot(shell: Shell): Promise<App> {
     theme,
     keyLight: null,
   });
+
+  // Printed once the post chain exists, because the live AA node list is part of the
+  // picture and only the chain knows which stages actually built. `tierOverride` is the
+  // authority on the source: resolveTier takes `override ?? detectTier(caps)`, so a
+  // non-null override means detectTier never ran.
+  {
+    const drawing = engine.renderer.getDrawingBufferSize(new Vector2());
+    const AA: readonly string[] = ['traa', 'taau', 'fsr1', 'smaa', 'fxaa'];
+    reportDiagnostics(
+      collectDiagnostics(
+        engine.caps,
+        quality,
+        tierOverride === null ? 'detected' : 'override',
+        engine.renderScale,
+        {
+          bufferWidth: Math.round(drawing.x),
+          bufferHeight: Math.round(drawing.y),
+          displayWidth: shell.canvas.clientWidth,
+          displayHeight: shell.canvas.clientHeight,
+          aaNodes: post.stages
+            .filter((stage) => stage.built && AA.includes(stage.effect))
+            .map((stage) => stage.effect),
+        },
+      ),
+    );
+  }
 
   if (import.meta.env.DEV) {
     console.info('[shatterpoint] tier', quality.graphics, 'post stages', post.stages);

@@ -20,7 +20,6 @@ import {
   Color,
   Fog,
   Group,
-  IcosahedronGeometry,
   Mesh,
   AdditiveBlending,
   MeshBasicNodeMaterial,
@@ -46,6 +45,9 @@ import {
   smoothstep,
   vec3,
 } from 'three/tsl';
+import { FIXED_STEP_MS } from '../core/Quality';
+import { ShatterFx } from './ShatterFx';
+import type { ShatterPhase } from './ShatterFx';
 import { createRng } from '../battle/Rng';
 import { glassMaterial } from './GlassMaterial';
 import type { GlassFeatures } from './GlassMaterial';
@@ -103,20 +105,10 @@ interface Ball {
   live: boolean;
 }
 
-interface Shard {
-  /** Staggered per-cell release. A pane that lets go all at once reads as a puff. */
-  delayMs: number;
-  readonly mesh: Mesh;
-  readonly velocity: Vector3;
-  readonly spin: Vector3;
-  ageMs: number;
-  live: boolean;
-}
-
 /** A pane or a crystal. One record type because they differ only in what hitting them does. */
 interface Target {
   readonly mesh: Mesh;
-  kind: 'pane' | 'crystal';
+  kind: 'pane' | 'crystal' | 'decorative';
   live: boolean;
   /** Panes only: how many more hits it takes. Laminated glass is 2. */
   hits: number;
@@ -140,6 +132,10 @@ export interface PlayfieldOptions {
   readonly glass: GlassFeatures;
   /** Coloured floor pools under lit panes. Dropped below ULTRA_4K. */
   readonly caustics: boolean;
+  /** QUALITY[tier].maxShardsLive. */
+  readonly maxShards: number;
+  /** Dust sprites per break. 20-40 on the top tiers, fewer below - count only, never alpha. */
+  readonly dustCount: number;
 }
 
 export class Playfield implements Tickable, Disposable {
@@ -152,22 +148,21 @@ export class Playfield implements Tickable, Disposable {
   private readonly rng: Rng;
 
   private readonly balls: Ball[] = [];
-  private readonly shards: Shard[] = [];
   private readonly targets: Target[] = [];
 
   private readonly paneGeometry = new PlaneGeometry(TUNING.paneWidth, TUNING.paneHeight);
-  private readonly shardGeometry = new IcosahedronGeometry(0.22, 0);
   private readonly ballGeometry = new SphereGeometry(TUNING.ballRadius, 20, 14);
   private readonly crystalGeometry = new OctahedronGeometry(TUNING.crystalRadius, 0);
   private readonly causticGeometry = new PlaneGeometry(TUNING.paneWidth * 1.5, TUNING.paneWidth * 1.5);
 
   private readonly paneMaterial: MeshStandardNodeMaterial;
   private readonly paneCrackedMaterial: MeshStandardNodeMaterial;
-  private readonly shardMaterial: MeshStandardNodeMaterial;
+  private readonly decorativeMaterial: MeshStandardNodeMaterial;
   private readonly ballMaterial: MeshStandardNodeMaterial;
   private readonly crystalMaterial: MeshBasicNodeMaterial;
   private readonly causticMaterial: MeshBasicNodeMaterial | null;
   private readonly caustics: Mesh[] = [];
+  private readonly fx: ShatterFx;
   private readonly ribMaterial: MeshStandardNodeMaterial;
   private readonly wallMaterial: MeshStandardNodeMaterial;
 
@@ -195,12 +190,6 @@ export class Playfield implements Tickable, Disposable {
   private multiplier = 1;
   private over = false;
   private spinPhase = 0;
-  private flashMs = 0;
-  /** Frames still to be SKIPPED. Hit-stop is a counter, never a scaled timestep. */
-  private hitStopFrames = 0;
-  private dustMs = 0;
-  private readonly flashMesh: Mesh;
-  private readonly dustMesh: Mesh;
 
   constructor(options: PlayfieldOptions) {
     this.scene = options.scene;
@@ -219,12 +208,25 @@ export class Playfield implements Tickable, Disposable {
     // The key sits down the corridor and slightly above, so the streak reads as a smear
     // across a pane rather than a dot on its centre.
     this.paneMaterial = glassMaterial({
+      role: 'breakable',
       tint: t.glass.tint,
       edge: t.glass.edge,
+      rimColour: t.emissive.primary,
       keyDirection: [0.15, 0.35, 1],
       features: options.glass,
       baseOpacity: t.glass.alpha,
     });
+    // Decorative glass: neutral, dimmer, no rim. It must never read as something to hit.
+    this.decorativeMaterial = glassMaterial({
+      role: 'decorative',
+      tint: t.glass.tint,
+      edge: t.glass.edge,
+      rimColour: t.emissive.primary,
+      keyDirection: [0.15, 0.35, 1],
+      features: options.glass,
+      baseOpacity: t.glass.alpha * 0.6,
+    });
+
     this.paneCrackedMaterial = new MeshStandardNodeMaterial({
       color: new Color().copy(t.glass.tint),
       emissive: new Color().copy(t.emissive.secondary),
@@ -233,15 +235,6 @@ export class Playfield implements Tickable, Disposable {
       opacity: 0.5,
       roughness: 0.3,
       metalness: 0.0,
-    });
-    this.shardMaterial = new MeshStandardNodeMaterial({
-      color: new Color().copy(t.glass.tint),
-      emissive: new Color().copy(t.glass.edge),
-      emissiveIntensity: 0.9,
-      transparent: true,
-      opacity: 0.8,
-      roughness: 0.15,
-      metalness: 0.1,
     });
     // A three-point studio read, which is what makes a sphere look spherical rather than
     // like a painted circle: a hard key hotspot, a soft fill on the shadow side, a rim from
@@ -277,15 +270,17 @@ export class Playfield implements Tickable, Disposable {
     }
     // Emissive-only, so the crystal stays exempt from any depth attenuation applied to the
     // surfaces around it - it is meant to be one of the few things that reaches full white.
+    // Scaled off the clipping point: unclamped it blooms to pure white at the vanishing
+    // point, and pure white is reserved for the single shatter flash frame.
     this.crystalMaterial = new MeshBasicNodeMaterial({
-      color: new Color().copy(t.emissive.primary),
+      color: new Color().copy(t.emissive.primary).multiplyScalar(0.78),
       transparent: true,
-      opacity: 0.95,
+      opacity: 0.92,
     });
     this.ribMaterial = new MeshStandardNodeMaterial({
       color: new Color().copy(t.metal),
-      emissive: new Color().copy(t.emissive.secondary),
-      emissiveIntensity: 0.3,
+      emissive: new Color(0.30, 0.32, 0.35),
+      emissiveIntensity: 0.22,
       roughness: 0.55,
       metalness: 0.85,
     });
@@ -298,18 +293,22 @@ export class Playfield implements Tickable, Disposable {
     // Floor and ceiling plates are lower-roughness than the walls so they pick up a blurred
     // reflection of the strips above them - that reflection is most of what sells depth.
     this.plateMaterial = new MeshStandardNodeMaterial({
-      color: new Color().copy(t.stone).multiplyScalar(0.34),
-      roughness: 0.34,
-      metalness: 0.55,
+      color: new Color().copy(t.stone).multiplyScalar(1.28),
+      roughness: 0.62,
+      metalness: 0.30,
     });
     this.mullionMaterial = new MeshStandardNodeMaterial({
-      color: new Color().copy(t.metal).multiplyScalar(0.42),
+      color: new Color().copy(t.metal).multiplyScalar(0.62),
       roughness: 0.42,
       metalness: 0.95,
     });
-    this.stripMaterial = new MeshBasicNodeMaterial({ color: new Color().copy(t.emissive.primary) });
+    // ONE saturated hue, reserved for things you can hit. Everything architectural is
+    // neutral, which is the entire reason a SUPERHOT frame reads instantly: the eye has
+    // nothing to disambiguate. Colour temperature still separates form - the key is cool
+    // and the bounce is warm - but neither is the reserved hue.
+    this.stripMaterial = new MeshBasicNodeMaterial({ color: new Color(0.40, 0.44, 0.50) });
     this.seamMaterial = new MeshBasicNodeMaterial({
-      color: new Color().copy(t.emissive.secondary),
+      color: new Color(0.62, 0.64, 0.68),
       transparent: true,
       opacity: 0.7,
     });
@@ -327,35 +326,34 @@ export class Playfield implements Tickable, Disposable {
         })
       : null;
 
-    // Phase 1 of the shatter: a single bright frame at the impact point. An unlit sphere
-    // so no light rig can dim it, and it is scaled to zero the instant its window closes.
-    this.flashMesh = new Mesh(
-      new SphereGeometry(1, 12, 8),
-      new MeshBasicNodeMaterial({ color: new Color(1, 1, 1), transparent: true, blending: AdditiveBlending, depthWrite: false }),
-    );
-    this.flashMesh.visible = false;
-    this.root.add(this.flashMesh);
-
-    // Phase 3's dust, on its own dissipation curve so it outlives the shards.
-    this.dustMesh = new Mesh(
-      new SphereGeometry(1, 12, 8),
-      new MeshBasicNodeMaterial({ color: new Color().copy(t.glass.edge), transparent: true, opacity: 0.16, blending: AdditiveBlending, depthWrite: false }),
-    );
-    this.dustMesh.visible = false;
-    this.root.add(this.dustMesh);
+    this.fx = new ShatterFx({
+      scene: options.scene,
+      camera: options.camera,
+      rng: this.rng,
+      seed: options.seed,
+      tint: t.glass.tint,
+      edge: t.glass.edge,
+      maxShards: options.maxShards,
+      dustCount: options.dustCount,
+      paneWidth: TUNING.paneWidth,
+      paneHeight: TUNING.paneHeight,
+    });
 
     this.buildShell();
 
     // FOUR light contributions, not one blob.
     // 1. Key, from the aperture. Hard-clamped: an unbounded point light at the vanishing
     //    point is what clipped the old frame to white across a third of the image.
-    this.keyLight = new PointLight(new Color().copy(t.emissive.primary), 24, 38, 2.0);
+    this.keyLight = new PointLight(new Color(0.72, 0.84, 1.0), 13, 48, 2.0);
     this.keyLight.position.set(0, 0.8, -22);
     this.root.add(this.keyLight);
 
     // 2. Cool bounce off the floor plates, upward onto the underside of everything.
-    this.bounceLight = new PointLight(new Color().copy(t.emissive.secondary), 8, 26, 2.2);
-    this.bounceLight.position.set(0, -TUNING.corridorHalfHeight + 0.4, -9);
+    this.bounceLight = new PointLight(new Color(1.0, 0.86, 0.68), 9, 34, 1.5);
+        // Lifted well clear of the plates: at 0.4m an inverse-square falloff blew the floor
+    // directly beneath it to pure white, which is the one thing the value structure forbids
+    // outside a named light source.
+    this.bounceLight.position.set(0, -TUNING.corridorHalfHeight + 1.6, -11);
     this.root.add(this.bounceLight);
 
     // 3. A moving light carried by the ball, so a throw brightens what it passes.
@@ -363,7 +361,7 @@ export class Playfield implements Tickable, Disposable {
     this.root.add(this.ballLight);
 
     // 4. Ambient floor fill, keeping shadow sides readable without lifting the black point.
-    const fill = new PointLight(new Color().copy(t.glass.edge), 2.4, 40, 2.0);
+    const fill = new PointLight(new Color(0.80, 0.86, 0.96), 7.0, 64, 1.5);
     fill.position.set(0, 1.2, -3);
     this.root.add(fill);
 
@@ -528,12 +526,16 @@ export class Playfield implements Tickable, Disposable {
     const band = Math.min(7, Math.floor(depth * 8));
     const existing = this.wallBands[band];
     if (existing !== undefined) return existing;
-    const factor = 1 - (band / 8) * 0.72;
+    // Depth falloff compressed from 0.72 to 0.42. A 2.7x spread across the ramp meant only
+    // a thin slice of the corridor ever sat in the controlled mid band; most surfaces were
+    // either side of it. Atmospheric perspective is preserved by the haze lerp and the
+    // roughness climb below, which carry distance without spending the whole value range.
+    const factor = 1 - (band / 8) * 0.42;
 
     // Contrast AND saturation both fall with depth. Darkening alone reads as "unlit", not
     // as "far away": what actually sells distance is chroma bleeding toward the haze colour,
     // because that is what an atmosphere physically does to a surface behind it.
-    const tint = new Color().copy(this.theme.stone).multiplyScalar(0.62 * factor + 0.04);
+    const tint = new Color().copy(this.theme.stone).multiplyScalar(0.92 * factor + 0.66);
     const hazed = new Color().copy(this.theme.haze.color).multiplyScalar(0.06);
     tint.lerp(hazed, (band / 8) * 0.65);
 
@@ -565,6 +567,9 @@ export class Playfield implements Tickable, Disposable {
       }
       const yJitter = (this.rng.next() - 0.5) * 1.2;
       this.spawnPane(x, yJitter, z, this.rng.next() < 0.22 ? 2 : 1);
+      // A decorative pane in the same row, so the player is constantly having to tell a
+      // target from scenery. If that read ever fails, the reserved-hue rule has failed.
+      if (this.rng.next() < 0.5) this.spawnDecorative(x, yJitter + 2.1, z);
     }
   }
 
@@ -606,6 +611,20 @@ export class Playfield implements Tickable, Disposable {
     }
     pool.visible = true;
     pool.userData['owner'] = target;
+  }
+
+  private spawnDecorative(x: number, y: number, z: number): void {
+    const target = this.acquireTarget();
+    if (target === null) return;
+    target.kind = 'decorative';
+    target.hits = 0;
+    target.live = true;
+    target.mesh.geometry = this.paneGeometry;
+    target.mesh.material = this.decorativeMaterial;
+    target.mesh.scale.set(1, 1, 1);
+    target.mesh.rotation.set(0, 0, 0);
+    target.mesh.position.set(x, y, z);
+    target.mesh.visible = true;
   }
 
   private spawnCrystal(x: number, y: number, z: number): void {
@@ -702,59 +721,17 @@ export class Playfield implements Tickable, Disposable {
 
   // ---- shatter ------------------------------------------------------------------------
 
-  private shatter(at: Vector3): void {
-    // PHASE 1 - one bright frame, PHASE 2 - a hit-stop hold, PHASE 3 - staggered release.
-    this.flashMs = TUNING.flashMs;
-    this.hitStopFrames = TUNING.hitStopFrames;
-    this.flashMesh.position.copy(at);
-    this.flashMesh.scale.setScalar(1.6);
-    this.flashMesh.visible = true;
-
-    this.dustMs = TUNING.dustLifetimeMs;
-    this.dustMesh.position.copy(at);
-    this.dustMesh.visible = true;
-
-    let live = 0;
-    for (const shard of this.shards) if (shard.live) live++;
-    if (live > TUNING.maxLiveShards) return;
-
-    for (let i = 0; i < TUNING.shardsPerPane; i++) {
-      const shard = this.acquireShard();
-      if (shard === null) return;
-      shard.mesh.position.copy(at);
-      // Released state first, animated outward - the same convention the shatter system
-      // uses, so a frozen frame shows a break that happened rather than one about to.
-      shard.velocity.set(
-        (this.rng.next() - 0.5) * TUNING.shardSpread,
-        (this.rng.next() - 0.5) * TUNING.shardSpread,
-        (this.rng.next() - 0.2) * TUNING.shardSpread * 0.6,
-      );
-      shard.spin.set(this.rng.next() * 6, this.rng.next() * 6, this.rng.next() * 6);
-      shard.ageMs = 0;
-      // Per-cell delay, biased so cells near the impact go first.
-      shard.delayMs = this.rng.next() * TUNING.shardDelayMaxMs;
-      shard.live = true;
-      shard.mesh.visible = true;
-      shard.mesh.scale.setScalar(0.6 + this.rng.next() * 0.8);
-    }
-  }
-
-  private acquireShard(): Shard | null {
-    for (const shard of this.shards) if (!shard.live) return shard;
-    if (this.shards.length >= TUNING.maxLiveShards) return null;
-    const mesh = new Mesh(this.shardGeometry, this.shardMaterial);
-    mesh.visible = false;
-    this.root.add(mesh);
-    const created: Shard = { mesh, velocity: new Vector3(), spin: new Vector3(), ageMs: 0, delayMs: 0, live: false };
-    this.shards.push(created);
-    return created;
-  }
-
   // ---- simulation ---------------------------------------------------------------------
 
   fixedUpdate(dtMs: Millis): void {
     const dt = dtMs / 1000;
-    if (this.over) return;
+
+    // The effects timeline runs even when the world does not. `frozen` holds the corridor
+    // still for a measurement, and the hit-stop holds it for the break - neither is a
+    // reason to stop the flash, the dust or the shards, which own their own clocks.
+    const worldHeld = this.over || this.frozen || this.fx.holding;
+    if (!this.frozen) this.fx.update(dtMs, worldHeld ? 0 : TUNING.travelSpeed * dt);
+    if (worldHeld) return;
 
     this.travel += TUNING.travelSpeed * dt;
     this.spinPhase += dt * TUNING.crystalSpinRate;
@@ -767,19 +744,8 @@ export class Playfield implements Tickable, Disposable {
     );
     this.camera.rotation.z = Math.sin(this.spinPhase * 0.23) * 0.004;
 
-    this.advanceFlash(dtMs);
-
-    // PHASE 2. Frames are SKIPPED, not slowed: a shard's trajectory is identical whether or
-    // not the hold happened, which is what keeps the shatter reproducible from a seed.
-    if (this.hitStopFrames > 0) {
-      this.hitStopFrames -= 1;
-      this.advanceShards(dtMs);
-      return;
-    }
-
     this.advanceWorld(dt);
     this.advanceBalls(dt);
-    this.advanceShards(dtMs);
   }
 
   /** Everything static moves toward the camera; the camera itself never translates. */
@@ -874,23 +840,6 @@ export class Playfield implements Tickable, Disposable {
     this.trackBallLight(lit);
   }
 
-  /** Phases 1 and 3's own timelines, which run even while the world is held. */
-  private advanceFlash(dtMs: Millis): void {
-    if (this.flashMs > 0) {
-      this.flashMs -= dtMs;
-      const k = Math.max(0, this.flashMs / TUNING.flashMs);
-      this.flashMesh.scale.setScalar(1.6 + (1 - k) * 2.2);
-      this.flashMesh.visible = this.flashMs > 0;
-    }
-    if (this.dustMs > 0) {
-      this.dustMs -= dtMs;
-      const k = 1 - Math.max(0, this.dustMs / TUNING.dustLifetimeMs);
-      // Expands fast then coasts - dust does not decelerate linearly.
-      this.dustMesh.scale.setScalar(0.4 + Math.sqrt(k) * TUNING.dustMaxScale);
-      this.dustMesh.visible = this.dustMs > 0;
-    }
-  }
-
   /** The in-flight ball carries its own light, so a throw visibly rakes the corridor. */
   private trackBallLight(lit: Ball | null): void {
     if (lit === null) {
@@ -906,6 +855,7 @@ export class Playfield implements Tickable, Disposable {
     const p = ball.mesh.position;
     for (const target of this.targets) {
       if (!target.live) continue;
+      if (target.kind === 'decorative') continue; // scenery, not a target
       const q = target.mesh.position;
       if (Math.abs(p.z - q.z) > TUNING.ballRadius + 0.5) continue;
 
@@ -928,7 +878,7 @@ export class Playfield implements Tickable, Disposable {
         target.mesh.material = this.paneCrackedMaterial;
         this.registerHit(20);
       } else {
-        this.shatter(q);
+        this.fx.burst(q, FIXED_STEP_MS);
         this.registerHit(100);
         target.live = false;
         target.mesh.visible = false;
@@ -938,33 +888,6 @@ export class Playfield implements Tickable, Disposable {
       return true;
     }
     return false;
-  }
-
-  private advanceShards(dtMs: Millis): void {
-    const dt = dtMs / 1000;
-    for (const shard of this.shards) {
-      if (!shard.live) continue;
-      shard.ageMs += dtMs;
-      if (shard.ageMs < shard.delayMs) continue; // still attached to the pane
-      shard.velocity.y += TUNING.gravity * dt;
-      shard.mesh.position.addScaledVector(shard.velocity, dt);
-      shard.mesh.position.z += TUNING.travelSpeed * dt;
-      shard.mesh.rotation.x += shard.spin.x * dt;
-      shard.mesh.rotation.y += shard.spin.y * dt;
-      shard.mesh.rotation.z += shard.spin.z * dt;
-
-      const life = shard.ageMs / TUNING.shardLifetime;
-      if (life >= 1) {
-        shard.live = false;
-        shard.mesh.visible = false;
-      } else {
-        shard.mesh.scale.setScalar((1 - life) * 1.1);
-        // Depth-sorted opacity: a shard further down the corridor fades sooner, so the
-        // cloud reads as having volume instead of as a flat sheet of identical chips.
-        const depth = Math.min(1, Math.abs(shard.mesh.position.z) / TUNING.spawnDistance);
-        shard.mesh.renderOrder = Math.round((1 - depth) * 100);
-      }
-    }
   }
 
   frame(): void {
@@ -982,17 +905,12 @@ export class Playfield implements Tickable, Disposable {
    * on a slow rasteriser a 34ms flash can fall between two screenshots, so the staging has
    * to be provable from state as well as from pixels.
    */
-  get shatterPhase(): 'idle' | 'flash' | 'hitstop' | 'release' {
-    if (this.flashMs > 0) return 'flash';
-    if (this.hitStopFrames > 0) return 'hitstop';
-    for (const shard of this.shards) if (shard.live) return 'release';
-    return 'idle';
+  get shatterPhase(): ShatterPhase {
+    return this.fx.phase;
   }
 
   get liveShards(): number {
-    let n = 0;
-    for (const shard of this.shards) if (shard.live) n++;
-    return n;
+    return this.fx.liveShards;
   }
 
   get balls_(): number {
@@ -1027,14 +945,9 @@ export class Playfield implements Tickable, Disposable {
    */
   restart(): void {
     for (const ball of this.balls) { ball.live = false; ball.mesh.visible = false; }
-    for (const shard of this.shards) { shard.live = false; shard.mesh.visible = false; }
     for (const target of this.targets) { target.live = false; target.mesh.visible = false; }
     for (const pool of this.caustics) pool.visible = false;
-    this.flashMesh.visible = false;
-    this.dustMesh.visible = false;
-    this.flashMs = 0;
-    this.dustMs = 0;
-    this.hitStopFrames = 0;
+    this.fx.reset();
 
     this.ballsLeft = BALLS_AT_START;
     this.score = 0;
@@ -1069,13 +982,35 @@ export class Playfield implements Tickable, Disposable {
 
   /** Fires a shatter at the reticle without needing a ball to connect. Capture-gate hook. */
   testShatter(): void {
-    this.shatter(new Vector3(0, 0, -12));
+    this.fx.burst(new Vector3(0, 0, -12), FIXED_STEP_MS);
   }
 
   /** One deterministic fixed step, for a capture that must not depend on frame rate. */
   testStep(dtMs: Millis): void {
+    // Drives the effects clock explicitly, because `frozen` deliberately stops the live
+    // loop from doing so - otherwise the capture races the renderer for the flash frame.
+    if (this.frozen) this.fx.update(dtMs, 0);
     this.fixedUpdate(dtMs);
   }
+
+  /**
+   * Clears the field and places exactly one pane at a known distance, dead centre. The
+   * legibility gate needs a controlled subject: measuring a rim against whatever happened
+   * to be behind it in a procedural row proves nothing.
+   */
+  testPlaceOnly(kind: 'pane' | 'decorative', distanceM: number, offsetX = 0): void {
+    for (const t of this.targets) { t.live = false; t.mesh.visible = false; }
+    for (const pool of this.caustics) pool.visible = false;
+    this.frozen = true;
+    // The caller can push the subject off the corridor axis: measuring dead centre puts the
+    // aperture glow directly behind the pane, and a max-luma read then measures the aperture
+    // rather than the pane - which is what reported invisible scenery at 100% luma.
+    if (kind === 'pane') this.spawnPane(offsetX, 0, -distanceM, 1);
+    else this.spawnDecorative(offsetX, 0, -distanceM);
+  }
+
+  /** Stops the treadmill so a measurement is not racing the corridor. */
+  private frozen = false;
 
   testMiss(): void {
     this.breakStreak();
@@ -1084,16 +1019,16 @@ export class Playfield implements Tickable, Disposable {
   dispose(): void {
     this.scene.remove(this.root);
     this.paneGeometry.dispose();
-    this.shardGeometry.dispose();
     this.ballGeometry.dispose();
     this.crystalGeometry.dispose();
     this.paneMaterial.dispose();
+    this.decorativeMaterial.dispose();
     this.paneCrackedMaterial.dispose();
-    this.shardMaterial.dispose();
     this.ballMaterial.dispose();
     this.crystalMaterial.dispose();
     this.causticMaterial?.dispose();
     this.causticGeometry.dispose();
+    this.fx.dispose();
     this.ribMaterial.dispose();
     this.wallMaterial.dispose();
     this.plateMaterial.dispose();

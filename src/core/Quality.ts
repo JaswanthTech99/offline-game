@@ -35,7 +35,15 @@ export const TIERS: readonly Tier[] = Object.freeze([
  * Rungs the dynamic-resolution controller may step between. Never leaves 0.6-1.0: below 0.6
  * the upscaler cannot reconstruct glass edges and the game's one hero material falls apart.
  */
-export const RENDER_SCALE_LADDER: readonly number[] = Object.freeze([0.6, 0.67, 0.75, 0.8, 0.9, 1.0]);
+/**
+ * Rungs above 1.0 are SUPERSAMPLING, not upscaling: the frame is rendered larger than the
+ * display and downsampled, which is the only anti-aliasing that works on every edge in the
+ * scene rather than only the ones a post pass can find. Without these rungs the renderer
+ * had no way to spend surplus GPU on image quality at all.
+ */
+export const RENDER_SCALE_LADDER: readonly number[] = Object.freeze([
+  0.6, 0.67, 0.75, 0.8, 0.9, 1.0, 1.25, 1.5, 2.0,
+]);
 
 /** The simulation rate. Fixed, forever, on every tier - only presentation rate varies. */
 export const FIXED_STEP_HZ = 60;
@@ -155,11 +163,23 @@ export interface PrewarmCounts {
 export interface QualityBudget {
   readonly tier: Tier;
   readonly targetFps: number;
-  /** Starting rung on RENDER_SCALE_LADDER. 4K is ALWAYS upscaled, never rendered native. */
+  /**
+   * Fallback rung, used only when the display size is not yet known. The real scale comes
+   * from `deriveRenderScale`, because a tier name says how much GPU is available, not how
+   * many pixels the display has - and those are independent facts. ULTRA_4K on a 1080p
+   * monitor should SUPERSAMPLE, not upscale from 0.67.
+   */
   readonly renderScale: number;
+  /**
+   * How many internal pixels this tier can afford per frame. This, not the tier name, is
+   * what decides render scale once the display is measured.
+   */
+  readonly pixelBudget: number;
   readonly renderScaleMin: number;
   readonly renderScaleMax: number;
   readonly maxShardsLive: number;
+  /** Additive dust sprites per break. Lower tiers cut COUNT, never alpha or sharpness. */
+  readonly dustSprites: number;
   readonly shardLifetimeMs: Millis;
   readonly moteBudget: number;
   readonly particleBudget: number;
@@ -205,10 +225,13 @@ const QUALITY_TABLE: Readonly<Record<Tier, QualityBudget>> = {
     targetFps: 60,
     // 4K native is a trap: it spends the entire frame on pixels nobody can resolve while
     // starving the shatter sim. Render at 0.67 and let TAAU reconstruct, then sharpen.
-    renderScale: 0.67,
+    renderScale: 1.0,
+    // ~4K worth of pixels. On a 1080p panel that lands at 2.0x supersampling.
+    pixelBudget: 3840 * 2160,
     renderScaleMin: 0.6,
-    renderScaleMax: 0.8,
+    renderScaleMax: 2.0,
     maxShardsLive: 2400,
+    dustSprites: 40,
     shardLifetimeMs: 6000,
     moteBudget: 6000,
     particleBudget: 12000,
@@ -228,7 +251,7 @@ const QUALITY_TABLE: Readonly<Record<Tier, QualityBudget>> = {
       traa: false,
       taau: true,
       fsr1: false,
-      smaa: false,
+      smaa: true,
       fxaa: false,
       chromaticAberration: true,
       film: true,
@@ -289,9 +312,11 @@ const QUALITY_TABLE: Readonly<Record<Tier, QualityBudget>> = {
     tier: 'DESKTOP_HIGH',
     targetFps: 60,
     renderScale: 1.0,
-    renderScaleMin: 0.75,
-    renderScaleMax: 1.0,
+    pixelBudget: 2560 * 1440,
+    renderScaleMin: 0.6,
+    renderScaleMax: 2.0,
     maxShardsLive: 1600,
+    dustSprites: 30,
     shardLifetimeMs: 5000,
     moteBudget: 4000,
     particleBudget: 8000,
@@ -373,9 +398,11 @@ const QUALITY_TABLE: Readonly<Record<Tier, QualityBudget>> = {
     tier: 'MOBILE_HIGH',
     targetFps: 60,
     renderScale: 0.8,
-    renderScaleMin: 0.67,
-    renderScaleMax: 0.9,
+    pixelBudget: 1600 * 900,
+    renderScaleMin: 0.6,
+    renderScaleMax: 2.0,
     maxShardsLive: 800,
+    dustSprites: 20,
     shardLifetimeMs: 3500,
     moteBudget: 1800,
     particleBudget: 3200,
@@ -396,8 +423,8 @@ const QUALITY_TABLE: Readonly<Record<Tier, QualityBudget>> = {
       taau: false,
       // Spatial upsample plus sharpen: no history buffer to pay for, no ghosting on shards.
       fsr1: true,
-      smaa: false,
-      fxaa: true,
+      smaa: true,
+      fxaa: false,
       chromaticAberration: false,
       film: true,
       vignette: true,
@@ -459,9 +486,11 @@ const QUALITY_TABLE: Readonly<Record<Tier, QualityBudget>> = {
     // two rates are independent, which is exactly why the step is fixed rather than scaled.
     targetFps: 30,
     renderScale: 0.6,
+    pixelBudget: 1280 * 720,
     renderScaleMin: 0.6,
-    renderScaleMax: 0.75,
+    renderScaleMax: 2.0,
     maxShardsLive: 320,
+    dustSprites: 12,
     shardLifetimeMs: 2500,
     moteBudget: 600,
     particleBudget: 1200,
@@ -481,8 +510,8 @@ const QUALITY_TABLE: Readonly<Record<Tier, QualityBudget>> = {
       traa: false,
       taau: false,
       fsr1: false,
-      smaa: false,
-      fxaa: true,
+      smaa: true,
+      fxaa: false,
       chromaticAberration: false,
       film: false,
       // Vignette and LUT survive everywhere: they cost almost nothing and they are most of
@@ -631,6 +660,30 @@ export const GLASS: Readonly<Record<Tier, GlassToggles>> = Object.freeze({
   // Flat fills. A Fresnel term is still cheap enough to keep glass from reading as card.
   MOBILE_LOW:   { fresnel: true,  bevel: false, refraction: false, streak: false, microNoise: false, caustics: false },
 });
+
+/**
+ * The render scale, derived from what the display actually is rather than from the tier's
+ * name. `budget.pixelBudget` says how many pixels the tier can afford; the display says how
+ * many it needs. The ratio of those two, square-rooted because scale is per-axis, is the
+ * answer - and it is allowed to exceed 1.0, which is the whole point.
+ */
+export function deriveRenderScale(
+  budget: QualityBudget,
+  displayWidth: number,
+  displayHeight: number,
+  devicePixelRatio: number,
+): number {
+  const displayPixels = Math.max(1, displayWidth * displayHeight * devicePixelRatio * devicePixelRatio);
+  const ideal = Math.sqrt(budget.pixelBudget / displayPixels);
+  const clamped = Math.min(Math.max(ideal, budget.renderScaleMin), budget.renderScaleMax);
+
+  // Snap DOWN to a rung: rounding up would put the frame over the budget it was derived from.
+  let best = RENDER_SCALE_LADDER[0] ?? 1;
+  for (const rung of RENDER_SCALE_LADDER) {
+    if (rung <= clamped + 1e-6 && rung >= (budget.renderScaleMin - 1e-6)) best = rung;
+  }
+  return best;
+}
 
 export const REDUCED_MOTION_TIER: Tier = 'MOBILE_LOW';
 

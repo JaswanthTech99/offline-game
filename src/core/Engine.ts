@@ -42,7 +42,7 @@ import type { Unsubscribe } from './Events';
 import { Loop } from './Loop';
 import type { LoopStats } from './Loop';
 import type { QualityResolution, Tier } from './Quality';
-import { FIXED_STEP_MS, RENDER_SCALE_LADDER, resolveTier } from './Quality';
+import { FIXED_STEP_MS, RENDER_SCALE_LADDER, deriveRenderScale, resolveTier } from './Quality';
 import type { Frames, Tickable } from './types';
 
 /** What the engine needs in order to draw at all. Supplied by the world layer. */
@@ -57,6 +57,8 @@ export interface EngineOptions {
   readonly tierOverride?: Tier | null;
   /** Boots the WebGL fallback deliberately, to exercise the no-compute path on a real GPU. */
   readonly forceWebGL?: boolean;
+  /** ?scale= override. Bypasses derivation entirely; still snapped to a ladder rung. */
+  readonly scaleOverride?: number | undefined;
 }
 
 export interface ResizeInfo {
@@ -168,7 +170,17 @@ export class Engine {
     this.capsValue = caps;
     this.tierOverride = options.tierOverride ?? null;
     this.qualityValue = resolveTier(caps, this.tierOverride);
-    this.renderScaleValue = this.qualityValue.budget.renderScale;
+    // Derived from the display, not from the tier name. The override wins when present.
+    const budget0 = this.qualityValue.budget;
+    this.renderScaleValue =
+      options.scaleOverride !== undefined && options.scaleOverride > 0
+        ? snapToLadder(options.scaleOverride, budget0.renderScaleMin, budget0.renderScaleMax)
+        : deriveRenderScale(
+            budget0,
+            options.canvas.clientWidth || globalThis.innerWidth,
+            options.canvas.clientHeight || globalThis.innerHeight,
+            globalThis.devicePixelRatio,
+          );
 
     // PCF is the WebGPU-safe filter in r185; PCFSoft is not reliably supported on the
     // backend and silently degrades rather than failing loudly.

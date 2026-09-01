@@ -21,6 +21,13 @@ export interface BootDiagnostics {
   readonly tier: Tier;
   readonly tierSource: TierSource;
   readonly renderScale: number;
+  readonly bufferWidth: number;
+  readonly bufferHeight: number;
+  readonly displayWidth: number;
+  readonly displayHeight: number;
+  /** Internal pixels per display pixel, per axis. Below 1.0 is upscaling. */
+  readonly pixelRatio: number;
+  readonly aaNodes: readonly string[];
 }
 
 const SOFTWARE_RASTERISERS = ['swiftshader', 'llvmpipe', 'softpipe', 'lavapipe', 'microsoft basic'];
@@ -50,11 +57,20 @@ function probeGlStrings(): { renderer: string; vendor: string } {
   return { renderer, vendor };
 }
 
+export interface SurfaceInfo {
+  readonly bufferWidth: number;
+  readonly bufferHeight: number;
+  readonly displayWidth: number;
+  readonly displayHeight: number;
+  readonly aaNodes: readonly string[];
+}
+
 export function collectDiagnostics(
   caps: EngineCaps,
   quality: QualityResolution,
   tierSource: TierSource,
   renderScale: number,
+  surface: SurfaceInfo,
 ): BootDiagnostics {
   const gl = probeGlStrings();
   const haystack = `${gl.renderer} ${gl.vendor} ${caps.adapterVendor} ${caps.adapterArchitecture}`.toLowerCase();
@@ -71,6 +87,13 @@ export function collectDiagnostics(
     tier: quality.graphics,
     tierSource,
     renderScale,
+    bufferWidth: surface.bufferWidth,
+    bufferHeight: surface.bufferHeight,
+    displayWidth: surface.displayWidth,
+    displayHeight: surface.displayHeight,
+    pixelRatio:
+      surface.displayWidth > 0 ? surface.bufferWidth / surface.displayWidth : 0,
+    aaNodes: surface.aaNodes,
   };
 }
 
@@ -83,6 +106,10 @@ export function reportDiagnostics(d: BootDiagnostics): void {
     `  GL_VENDOR        : ${d.glVendor || '(withheld)'}`,
     `  tier             : ${d.tier}  (${d.tierSource})`,
     `  render scale     : ${d.renderScale.toFixed(2)}  (after ladder snap)`,
+    `  internal buffer  : ${d.bufferWidth} x ${d.bufferHeight}`,
+    `  display          : ${d.displayWidth} x ${d.displayHeight}`,
+    `  buffer / display : ${d.pixelRatio.toFixed(3)}  ${d.pixelRatio >= 1 ? '(native or supersampled)' : '(UPSCALED)'}`,
+    `  AA live          : ${d.aaNodes.length > 0 ? d.aaNodes.join(', ') : '(none)'}`,
   ];
   console.info(`[shatterpoint] boot diagnostics\n${lines.join('\n')}`);
 
