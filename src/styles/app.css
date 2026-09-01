@@ -1,0 +1,480 @@
+/*
+ * THE APPLICATION SHELL AND THE SCREEN-SPACE POST STACK.
+ *
+ * Two jobs live here and they are related.
+ *
+ * The first is the document itself: a full-bleed WebGPU canvas with a DOM overlay on top,
+ * with every browser affordance that would fight an on-rails runner switched off --
+ * overscroll bounce, double-tap zoom, text selection, the tap highlight, the context menu
+ * on long press. None of those are style preferences; each one is a bug report waiting to
+ * be filed about a throw that did not register.
+ *
+ * The second is the part of the post chain that is CHEAPER IN THE COMPOSITOR THAN IN THE
+ * RENDER GRAPH. Vignette, grain and scanlines are full-screen constant-cost operations
+ * with no dependence on scene depth or motion vectors. Running them as TSL nodes means a
+ * full-resolution read and write of the HDR target per effect, inside the frame budget the
+ * shatter simulation is competing for. Running them as three composited DOM layers costs
+ * the GPU a blend of three quads it was going to composite anyway, and costs the render
+ * graph nothing. The effects that genuinely need scene data -- bloom, GTAO, SSR, TRAA,
+ * depth of field, the real per-pixel chromatic aberration -- stay in the render graph
+ * where they belong; the layer named `.fx__aberration` below is the wide-angle edge fringe
+ * only, and says so where it is defined.
+ *
+ * PRESETS ARE NOT A LABEL.
+ * `[data-preset]` on <html> is written once by main.ts from the resolved tier. Each preset
+ * block below has to make the frame genuinely cheaper, which means removing layers from
+ * the render tree with `display: none` and removing filters with `filter: none` -- not
+ * setting an opacity to zero. A zero-opacity full-screen layer is still composited, a
+ * `blur(0px)` is still a filter that allocates a backing surface, and a `will-change`
+ * nobody reads is still a compositor layer holding video memory. A preset that only claims
+ * to change the render is worthless, so every collapse here is structural.
+ */
+
+/* ============================================================ DOCUMENT SHELL */
+@layer base {
+  html {
+    block-size: 100%;
+    background: var(--void-000);
+    color-scheme: dark;
+    /* iOS inflates text in landscape unless told not to, which silently breaks every
+       HUD gutter measurement the moment the phone is rotated. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    min-block-size: 100%;
+    background: var(--void-000);
+    color: var(--ink);
+    font-family: var(--font-ui-stack);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    /* The page never scrolls: the corridor is the scroll. `overflow: hidden` alone still
+       lets iOS rubber-band the viewport, so overscroll-behavior has to say it too. */
+    overflow: hidden;
+    overscroll-behavior: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  #app {
+    position: fixed;
+    inset: 0;
+    /* A stacking context on the root container, so canvas / fx / overlay order is DOM
+       order and no descendant can escape it with a z-index of its own invention. */
+    isolation: isolate;
+  }
+
+  /*
+   * The canvas is sized in CSS and its backing store is sized by the renderer from
+   * QualityBudget.renderScale. Those are deliberately different numbers -- the drawing
+   * buffer is allowed to be smaller than the element and be upscaled, which is the entire
+   * point of the render-scale ladder -- so nothing here may set width/height attributes.
+   */
+  #stage {
+    position: absolute;
+    inset: 0;
+    inline-size: 100%;
+    block-size: 100%;
+    display: block;
+    /* Without this, a swipe to aim scrolls the page instead and the throw never fires. */
+    touch-action: none;
+    outline: none;
+  }
+
+  #overlay {
+    position: absolute;
+    inset: 0;
+    /* The overlay element itself is inert; ui/Overlay.ts opens `.hit` when the game is
+       paused or in a menu. See the pointer-events gate in ui/Overlay.ts. */
+    pointer-events: none;
+  }
+}
+
+/*
+ * NO TOKEN BRIDGE FOR ui/Overlay.ts, DELIBERATELY.
+ *
+ * Overlay's injected stylesheet declares its `--sp-*` slots as `var(--ink)`, `var(--ice)`
+ * and so on, so it reads the tokens above directly and there is exactly one colour system
+ * in the app. An earlier bridge here re-pointed a second set of hard-coded defaults; that
+ * is the drift this file used to paper over, and the fix was to delete the defaults rather
+ * than out-specify them. A var() with nothing behind it inherits, which is what a unit test
+ * mounting the overlay with no application CSS should get.
+ *
+ * `--sp-ui-transition` and `--sp-hud-pulse` are still Overlay's own: it writes those two as
+ * inline styles from the resolved MotionRules, and inline beats every rule in this file.
+ */
+
+/* ================================================================= BOOT VEIL
+ *
+ * Present in the HTML rather than created by main.ts, so the first paint after the
+ * document parses is already the game's own black instead of a white flash while the
+ * module graph downloads. main.ts writes its status line and then removes the node.
+ */
+.boot {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-content: center;
+  gap: 14px;
+  justify-items: center;
+  background: var(--void-000);
+  transition: opacity var(--dur-scene) var(--e-out);
+}
+
+.boot[data-state='done'] {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* A failure re-shows the veil, including one re-attached mid-run after a lost device, so
+   the opacity has to be stated rather than inherited from whatever state it was left in. */
+.boot[data-state='failed'] {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.boot__word {
+  margin: 0;
+  font-size: clamp(22px, 5vw, 38px);
+  letter-spacing: 0.42em;
+  /* Tracking is applied to the right of every glyph including the last, which visually
+     shifts a centred word left by half a step. */
+  text-indent: 0.42em;
+  color: var(--ink);
+}
+
+.boot__status {
+  margin: 0;
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  text-align: center;
+  max-inline-size: 46ch;
+  text-wrap: balance;
+}
+
+.boot__status[data-tone='fail'] {
+  color: var(--flare);
+}
+
+.boot__bar {
+  inline-size: min(220px, 52vw);
+  block-size: 2px;
+  overflow: hidden;
+  background: rgb(var(--rgb-ice) / 0.14);
+}
+
+.boot__bar::after {
+  content: '';
+  display: block;
+  block-size: 100%;
+  inline-size: 34%;
+  background: var(--ice);
+  /* transform only -- a boot animation that thrashes layout while the WASM and the WebGPU
+     device are both initialising is competing for the exact thread it is reporting on. */
+  animation: boot-sweep 1100ms var(--e-out) infinite;
+  will-change: transform;
+}
+
+@keyframes boot-sweep {
+  from { transform: translate3d(-100%, 0, 0); }
+  to { transform: translate3d(340%, 0, 0); }
+}
+
+.noscript {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-content: center;
+  padding: var(--gutter);
+  background: var(--void-000);
+  color: var(--ink-dim);
+  text-align: center;
+}
+
+/* ============================================================== THE FX STACK
+ *
+ * One inert container, four sibling layers, painted in DOM order.
+ *
+ * `.fx` HAS NO z-index AND NO `contain`, AND THAT IS LOAD-BEARING.
+ * Two of these layers blend with what is behind them - the aberration screens light onto
+ * the frame, the grain modulates its midtones - and `mix-blend-mode` blends against the
+ * backdrop of the nearest stacking context, not against the page. A `z-index` on a
+ * positioned element creates a stacking context. So does `contain: layout` and so does
+ * `contain: paint`. Any of the three would make these layers blend against `.fx`'s own
+ * transparent backdrop, which is a no-op: the grain would sit on top as a grey wash and
+ * the aberration would stop being additive at all. Both would still LOOK like they were
+ * doing something, which is the worst failure mode available.
+ *
+ * With no stacking context here, the blending group is `#app` (which isolates), the
+ * backdrop is the canvas, and paint order falls out of DOM order: canvas, fx, overlay.
+ * `overflow: hidden` clips the grain layer's overscan without promoting anything --
+ * overflow establishes a block formatting context, never a stacking context.
+ *
+ * The four intensity knobs are the only things the presets touch, apart from the
+ * structural removals further down.
+ */
+:root {
+  --fx-vignette: 0.55;
+  /* Unitless magnification delta, not a pixel offset -- see .fx__aberration. */
+  --fx-ca: 0.006;
+  --fx-scan: 0.05;
+  --fx-grain: 0.055;
+}
+
+.fx {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.fx__layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/*
+ * VIGNETTE. Hand-rolled here rather than in TSL because r185 ships no VignetteNode and a
+ * radial darkening of the final image is exactly what a composited gradient is for. The
+ * stop sits at 42% so the centre third of the frame -- where the reticle and the next
+ * pane always are -- is completely untouched.
+ */
+.fx__vignette {
+  background: radial-gradient(
+    farthest-side at 50% 50%,
+    transparent 42%,
+    rgb(3 5 9 / 0.55) 88%,
+    rgb(2 3 6 / 0.92) 130%
+  );
+  opacity: var(--fx-vignette);
+}
+
+/*
+ * CHROMATIC ABERRATION -- THE EDGE FRINGE ONLY.
+ *
+ * This is not the render-graph effect. Per-pixel aberration needs to resample the scene
+ * colour along the radial axis, and that is ChromaticAberrationNode's job in the post
+ * chain. What a composited layer can honestly contribute is the wide-angle lens artefact
+ * that dominates the look: warm and cool fringes that exist only near the corners and
+ * grow with radius.
+ *
+ * The two rings are separated by MAGNIFICATION, not by a lateral offset. Lateral
+ * chromatic aberration is a difference in focal length between wavelengths, so the red
+ * image is very slightly larger than the blue one and the split is radial -- strongest at
+ * the corners, exactly zero on the optical axis. A translate would put an equal fringe on
+ * the centre of the frame, where a real lens has none, and would also let the two rings
+ * cancel into a plain glow instead of separating into two colours.
+ *
+ * Kept faint on purpose. Over a lit corridor this reads as a fringe on the bright glass
+ * edges that reach the corners; turned up far enough to be obvious over an empty frame it
+ * would be a coloured halo over a full one.
+ */
+.fx__aberration {
+  mix-blend-mode: screen;
+  opacity: 0.35;
+}
+
+.fx__aberration::before,
+.fx__aberration::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  /* Both rings start well outside the action safe area: nothing the player aims at is
+     ever inside the fringe. */
+  background: radial-gradient(farthest-side at 50% 50%, transparent 72%, var(--fx-ca-tint) 122%);
+}
+
+.fx__aberration::before {
+  --fx-ca-tint: rgb(255 60 100 / 0.28);
+  transform: scale(calc(1 + var(--fx-ca)));
+}
+
+.fx__aberration::after {
+  --fx-ca-tint: rgb(60 190 255 / 0.28);
+  transform: scale(calc(1 - var(--fx-ca)));
+}
+
+/*
+ * SCANLINES. The layer is 200% tall and drifts by exactly half its height, so the loop
+ * point lands on an identical row of the repeating gradient and the seam is invisible.
+ * translate3d, never background-position: the latter repaints the full-screen gradient
+ * every frame, the former is a compositor transform on a layer that never repaints at all.
+ */
+.fx__scanlines {
+  block-size: 200%;
+  background: repeating-linear-gradient(
+    0deg,
+    rgb(0 0 0 / 0.5) 0px,
+    rgb(0 0 0 / 0.5) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  opacity: var(--fx-scan);
+  animation: fx-drift var(--dur-loop-slow) linear infinite;
+  will-change: transform;
+}
+
+@keyframes fx-drift {
+  from { transform: translate3d(0, 0, 0); }
+  to { transform: translate3d(0, -50%, 0); }
+}
+
+/*
+ * GRAIN. An feTurbulence tile rendered once at decode into a static image -- no filter
+ * runs per frame. It is jittered in whole-tile steps so the noise field resamples without
+ * ever revealing the tile boundary; `steps()` rather than a smooth curve because grain
+ * that slides continuously reads as a moving texture instead of as film.
+ *
+ * Grain goes last and on `overlay` blend so it modulates midtones without lifting the
+ * blacks, which is the difference between film grain and a grey wash over the corridor.
+ */
+.fx__grain {
+  inset: -60px;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='g'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/><feColorMatrix type='saturate' values='0'/></filter><rect width='160' height='160' filter='url(%23g)' opacity='0.6'/></svg>");
+  background-repeat: repeat;
+  mix-blend-mode: overlay;
+  opacity: var(--fx-grain);
+  animation: fx-grain 900ms steps(1, end) infinite;
+  will-change: transform;
+}
+
+@keyframes fx-grain {
+  0% { transform: translate3d(0, 0, 0); }
+  20% { transform: translate3d(-24px, 12px, 0); }
+  40% { transform: translate3d(18px, -20px, 0); }
+  60% { transform: translate3d(-12px, -8px, 0); }
+  80% { transform: translate3d(26px, 16px, 0); }
+  100% { transform: translate3d(0, 0, 0); }
+}
+
+/* =================================================================== PRESETS
+ *
+ * Written by main.ts as `data-preset` on <html>, from the tier core/Quality.ts resolved.
+ * The names are the tier names lowercased with underscores turned into hyphens; the
+ * mapping lives in main.ts and nowhere else.
+ */
+
+/* ULTRA_4K -- the reference look. Nothing is removed, and the grain is finer because at
+   this pixel density a coarser field reads as dirt on the screen rather than as film. */
+[data-preset='ultra-4k'] {
+  --fx-vignette: 0.58;
+  --fx-ca: 0.0085;
+  --fx-scan: 0.045;
+  --fx-grain: 0.05;
+  --glass-blur: 18px;
+}
+
+[data-preset='desktop-high'] {
+  --fx-vignette: 0.55;
+  --fx-ca: 0.006;
+  --fx-scan: 0.05;
+  --fx-grain: 0.055;
+  --glass-blur: 14px;
+}
+
+/*
+ * MOBILE_HIGH. The blur halves and the scanline layer LEAVES THE TREE rather than fading
+ * out: a 1px repeating gradient over a 3x DPR display is a per-pixel pattern the panel
+ * cannot resolve, so it costs a full-screen blend to produce moire and nothing else.
+ */
+[data-preset='mobile-high'] {
+  --fx-vignette: 0.5;
+  --fx-ca: 0.004;
+  --fx-grain: 0.04;
+  --glass-blur: 8px;
+}
+
+[data-preset='mobile-high'] .fx__scanlines {
+  display: none;
+}
+
+/*
+ * MOBILE_LOW -- THE HONEST COLLAPSE.
+ *
+ * Three of the four layers are removed from the render tree, not dimmed. Every blur in
+ * the document is switched off at the source, including ones declared in stylesheets this
+ * file has never seen: ui/Overlay.ts, ui/Motion.ts and any future widget module inject
+ * their own CSS at runtime, so a preset that only zeroed the tokens it knows about would
+ * leave real backdrop-filters running on the exact hardware that cannot afford them.
+ *
+ * The descendant-universal selector is deliberate and is the reason this preset is worth
+ * anything. It is matched once per element at style resolution, not per frame, and it
+ * buys a hard guarantee: on MOBILE_LOW there is no backdrop-filter and no filter anywhere
+ * in the document. `!important` because the declarations it is overriding are inside
+ * injected sheets that load after this one.
+ */
+[data-preset='mobile-low'] {
+  --fx-vignette: 0.42;
+  --fx-ca: 0;
+  --fx-scan: 0;
+  --fx-grain: 0;
+  --glass-blur: 0px;
+  /* Opaque, because with the blur gone a translucent panel is just a dark tint over a
+     busy corridor and the text on it stops being readable. */
+  --glass: rgb(9 14 22 / 0.94);
+  --glass-deep: rgb(6 10 16 / 0.97);
+}
+
+[data-preset='mobile-low'] .fx__aberration,
+[data-preset='mobile-low'] .fx__scanlines,
+[data-preset='mobile-low'] .fx__grain {
+  display: none;
+}
+
+[data-preset='mobile-low'] .glass,
+[data-preset='mobile-low'] .sp-overlay,
+[data-preset='mobile-low'] .sp-overlay *,
+[data-preset='mobile-low'] .sp-overlay *::before,
+[data-preset='mobile-low'] .sp-overlay *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  filter: none !important;
+}
+
+/* The halo's soft falloff is a blur, so on this preset it becomes a plain radial gradient
+   rather than `blur(0px)`, which would still allocate a filter surface per haloed element. */
+[data-preset='mobile-low'] .a-halo::before {
+  filter: none;
+}
+
+/* A `will-change` the compositor honours is a promoted layer holding video memory whether
+   or not anything animates. On the tier with the least of it, promote nothing speculatively. */
+[data-preset='mobile-low'] .meter__fill,
+[data-preset='mobile-low'] .fx__scanlines,
+[data-preset='mobile-low'] .fx__grain,
+[data-preset='mobile-low'] .boot__bar::after {
+  will-change: auto;
+}
+
+/*
+ * REDUCED MOTION.
+ *
+ * Independent of the preset axis, exactly as core/Quality.ts models it: a 4090 whose owner
+ * asked for stillness keeps every pixel of the ULTRA_4K look and loses only the movement.
+ * The two drifting layers stop; nothing is removed, because a motionless grain field is
+ * still the correct image.
+ *
+ * Emitted against the media query AND an explicit attribute, so the preference can be set
+ * in-game by a player whose OS was never told, and so it applies before any JS has run.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .fx__scanlines,
+  .fx__grain,
+  .boot__bar::after {
+    animation: none !important;
+  }
+}
+
+[data-motion='reduced'] .fx__scanlines,
+[data-motion='reduced'] .fx__grain,
+[data-motion='reduced'] .boot__bar::after {
+  animation: none !important;
+}

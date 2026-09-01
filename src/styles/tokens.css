@@ -1,0 +1,412 @@
+/*
+ * THE TOKEN LAYER.
+ *
+ * Tailwind v4 has no config file: the design system IS this @theme block, and every
+ * token below is emitted as a real custom property on :root as well as generating the
+ * matching utility. Nothing in the app hard-codes a colour, a radius or a curve.
+ *
+ * THE ACCENT CHANNEL IS THE ONE IDEA WORTH READING TWICE.
+ * Four accents exist and each owns exactly one meaning:
+ *
+ *     --ice    the player      (their ball, their reticle, their trajectory)
+ *     --flare  damage          (impacts, ball loss, the run ending)
+ *     --prism  rarity/pickups  (crystals, unlocks, anything the player gains)
+ *     --gold   score/currency  (points, prisms banked, multipliers)
+ *
+ * They are NOT consumed by name. A subtree carries `data-accent` (or `data-rarity`),
+ * which re-points TWO variables -- `--a` and `--rgb-a` -- and every consumer inside that
+ * subtree inherits the new meaning without knowing it changed. `.a-glow` is written once
+ * and glows ice in the ammo cluster, flare in the damage flash and gold on the score
+ * ticker, because CSS custom properties inherit and class lists do not. The alternative
+ * -- `.glow-ice`, `.glow-flare`, `.glow-prism`, `.glow-gold` -- is four times the CSS and
+ * grows multiplicatively with every new consumer.
+ *
+ * Adding a fifth accent is one @theme pair plus one two-line block in ACCENT CHANNEL.
+ * No consumer is touched. That is the whole test of whether this design is real.
+ *
+ * WHY THE SUBSTRATE IS A RAMP AND NOT A PALETTE.
+ * void-000..500 is one hue at six depths. Seven universes push wildly different light
+ * through the corridor behind the UI; a substrate with any chroma in it fights whichever
+ * universe disagrees. A neutral ramp never does, and the accent channel supplies all the
+ * colour the interface is allowed to have.
+ */
+
+@import 'tailwindcss';
+
+@theme {
+  /* ---------------------------------------------------------------- substrate ramp
+     000 is the true ground -- it matches the PWA theme_color and the <meta name="theme-color">
+     so the browser chrome, the splash screen and the canvas clear colour are one surface. */
+  --color-void-000: #05070b;
+  --color-void-100: #0a0f17;
+  --color-void-200: #111926;
+  --color-void-300: #1a2634;
+  --color-void-400: #26364a;
+  --color-void-500: #3a4d66;
+
+  /* ---------------------------------------------------------------------- ink
+     Three weights, because a fourth always turns out to be one of these three. */
+  --color-ink: #eaf2ff;
+  /* Carry their own alpha rather than being tinted toward the substrate: the ink sits over
+     glass whose own alpha varies by preset, so a solid mid-grey would read as a different
+     weight on every tier while a translucent one reads the same on all of them. */
+  --color-ink-dim: rgb(196 214 238 / 0.62);
+  --color-ink-faint: rgb(158 180 210 / 0.34);
+
+  /* ------------------------------------------------------------------ accents
+     Each accent ships as a hex (for utilities and plain fills) and as a bare rgb
+     triple (for `rgb(var(--rgb-x) / a)`, the only way to vary alpha on an inherited
+     colour without a second token per opacity step). */
+  --color-ice: #6fd8ff;
+  --rgb-ice: 111 216 255;
+
+  --color-flare: #ff5d6c;
+  --rgb-flare: 255 93 108;
+
+  --color-prism: #b47dff;
+  --rgb-prism: 180 125 255;
+
+  --color-gold: #ffc46b;
+  --rgb-gold: 255 196 107;
+
+  /* --------------------------------------------------------------------- glass
+     DARK-BASED, ALWAYS. A white-tinted panel is legible over void-cathedral and
+     illegible over zenith-field: frosted white takes on whatever is behind it, so it
+     reads as a bright panel over a dark corridor and as nothing at all over a bright
+     one. Dark glass plus a bright 1px top edge inverts that dependency -- the panel is
+     a hole punched in the scene and the edge is the only thing that catches the light,
+     which is stable across all seven universes and costs one hairline to prove. */
+  --color-glass: rgb(12 18 28 / 0.62);
+  --color-glass-deep: rgb(8 12 20 / 0.82);
+  --color-glass-line: rgb(150 200 255 / 0.16);
+  --color-glass-edge: rgb(198 228 255 / 0.34);
+  --color-shadow: rgb(2 4 8 / 0.72);
+
+  /* -------------------------------------------------------------------- radius
+     2px is a ceiling, not a default. Anything rounder reads as a consumer app; this
+     interface is instrumentation bolted to the inside of a moving corridor. */
+  --radius-panel: 2px;
+  --radius-chip: 2px;
+  --radius-round: 50%;
+
+  /* --------------------------------------------------------------------- fonts
+     Three roles and no overlap. Sora carries display weight, Barlow Condensed packs
+     labels into HUD gutters, and JetBrains Mono is reserved for values that change
+     while the player is looking at them -- see --font-mono's tabular contract below. */
+  --font-display: 'Sora', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-ui: 'Barlow Condensed', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  /* ------------------------------------------------------------------- easings
+     The two springs are sampled step responses of an underdamped mass-spring-damper,
+     emitted as linear(); the values are byte-identical to what ui/Motion.ts injects at
+     install so nothing shifts the frame the tier resolves. The other three are pure
+     eases with no rebound to resolve -- sampling them into linear() would only add
+     quantisation error to a curve a cubic-bezier already describes exactly. */
+  --ease-spring: linear(0, 0.0831, 0.277, 0.5109, 0.7341, 0.916, 1.0438, 1.1177, 1.1462, 1.1416, 1.1169, 1.0833, 1.0492, 1.0201, 0.9986, 0.9853, 0.9791, 0.9785, 0.9814, 0.9861, 1);
+  --ease-spring-soft: linear(0, 0.0372, 0.1274, 0.2447, 0.371, 0.4942, 0.607, 0.7054, 0.7879, 0.8547, 0.9069, 0.9463, 0.9749, 0.9946, 1.0075, 1.0151, 1.0189, 1.0199, 1.0192, 1.0174, 1);
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-snap: cubic-bezier(0.4, 0, 0.1, 1);
+  --ease-impact: cubic-bezier(0.05, 0.85, 0.15, 1.06);
+}
+
+/*
+ * SHORT ALIASES.
+ *
+ * @theme owns every literal; this block owns none. The short names exist because
+ * `var(--ice)` is what a rule that means "the player" should read like, and because the
+ * Tailwind namespace prefixes (--color-, --ease-, --radius-) are a build-system detail
+ * that has no business appearing in authored CSS.
+ */
+:root {
+  --void-000: var(--color-void-000);
+  --void-100: var(--color-void-100);
+  --void-200: var(--color-void-200);
+  --void-300: var(--color-void-300);
+  --void-400: var(--color-void-400);
+  --void-500: var(--color-void-500);
+
+  --ink: var(--color-ink);
+  --ink-dim: var(--color-ink-dim);
+  --ink-faint: var(--color-ink-faint);
+
+  --ice: var(--color-ice);
+  --flare: var(--color-flare);
+  --prism: var(--color-prism);
+  --gold: var(--color-gold);
+
+  --glass: var(--color-glass);
+  --glass-deep: var(--color-glass-deep);
+  --glass-line: var(--color-glass-line);
+  --glass-edge: var(--color-glass-edge);
+  --shadow: var(--color-shadow);
+
+  /* Backdrop blur radius AND the blur the glassIn entrance animates from. Deliberately
+     one token: a preset that switches blurs off must switch off both, and two tokens is
+     how you end up shipping a "no blur" tier that still pays for a 14px filter on entry. */
+  --glass-blur: 14px;
+
+  --r-panel: var(--radius-panel);
+  --r-chip: var(--radius-chip);
+  --r-round: var(--radius-round);
+
+  --font-display-stack: var(--font-display);
+  --font-ui-stack: var(--font-ui);
+  --font-mono-stack: var(--font-mono);
+
+  /* ui/Motion.ts re-declares these five on :root with tier-aware spring sampling. The
+     values here are identical, so authored CSS is correct before installMotion() runs
+     and identical after -- there is no boot flash and no second source of truth. */
+  --e-spring: var(--ease-spring);
+  --e-spring-soft: var(--ease-spring-soft);
+  --e-out: var(--ease-out);
+  --e-snap: var(--ease-snap);
+  --e-impact: var(--ease-impact);
+
+  /* Stagger is a step index multiplier, not a duration: an element carries
+     `style="--delay: 3"` and the sheet computes `calc(var(--delay) * var(--stagger))`.
+     Matches STAGGER_MS in ui/Motion.ts. */
+  --stagger: 55ms;
+
+  /* Static defaults for the duration ladder ui/Motion.ts re-emits per tier. */
+  --dur-instant: 90ms;
+  --dur-quick: 140ms;
+  --dur-base: 200ms;
+  --dur-slow: 320ms;
+  --dur-scene: 520ms;
+  --dur-loop: 1800ms;
+  --dur-loop-slow: 3200ms;
+
+  /* ------------------------------------------------------------------ safe area
+     env() cannot live in @theme -- Tailwind resolves theme values at build time and
+     env() is a runtime lookup. Read these, never env() directly, so a notch inset can
+     be forced in a screenshot harness by overriding four variables. */
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
+
+  /* Gutter the HUD keeps off the physical screen edge, on top of the safe area. */
+  --gutter: 18px;
+  --pad-t: calc(var(--safe-t) + var(--gutter));
+  --pad-r: calc(var(--safe-r) + var(--gutter));
+  --pad-b: calc(var(--safe-b) + var(--gutter));
+  --pad-l: calc(var(--safe-l) + var(--gutter));
+}
+
+/* ============================================================== ACCENT CHANNEL
+ *
+ * Two variables carry all four meanings. `--a` is the colour; `--rgb-a` is the same
+ * colour as a bare triple so consumers can vary alpha without a token per step.
+ * `--a-lift` is intensity, 0..1: it scales glow and halo without touching hue, which is
+ * what lets the rarity ladder be one accent at four strengths instead of four accents.
+ *
+ * TO ADD A FIFTH ACCENT: one @theme pair above, one block here. Nothing else.
+ */
+:root {
+  --a: var(--ice);
+  --rgb-a: var(--rgb-ice);
+  --a-lift: 1;
+}
+
+[data-accent='ice'] { --a: var(--ice); --rgb-a: var(--rgb-ice); }
+[data-accent='flare'] { --a: var(--flare); --rgb-a: var(--rgb-flare); }
+[data-accent='prism'] { --a: var(--prism); --rgb-a: var(--rgb-prism); }
+[data-accent='gold'] { --a: var(--gold); --rgb-a: var(--rgb-gold); }
+
+/*
+ * RARITY IS PRISM AT FOUR STRENGTHS, NOT FOUR COLOURS.
+ *
+ * Handing rarity its own hue ladder would give gold a second job (top-tier drops) and
+ * ice a third (low-tier drops), and the moment an accent has two jobs the player can no
+ * longer read colour as meaning. Rarity instead rides --a-lift, so a common pickup is a
+ * colourless prism and a mythic one is a saturated one. `--a` is mixed toward ink at low
+ * lift; `--rgb-a` stays pure prism because glow alpha is already scaled by --a-lift and
+ * fading a glow twice makes rare drops invisible.
+ */
+[data-rarity] {
+  --a: color-mix(in oklab, var(--prism) calc(var(--a-lift) * 100%), var(--ink-dim));
+  --rgb-a: var(--rgb-prism);
+}
+
+[data-rarity='common'] { --a-lift: 0; }
+[data-rarity='rare'] { --a-lift: 0.45; }
+[data-rarity='epic'] { --a-lift: 0.75; }
+[data-rarity='mythic'] { --a-lift: 1; }
+
+/* ================================================================== CONSUMERS
+ *
+ * Every rule below reads --a / --rgb-a / --a-lift and nothing else. None of them names
+ * an accent. Re-parenting one of these under a different [data-accent] is the entire
+ * theming API.
+ *
+ * They live in the components layer so a Tailwind utility can still win against them
+ * without !important, which is the only reason the layer system exists.
+ */
+@layer components {
+  /* The plain fill: text, icon strokes, a solid chip. */
+  .a-fill {
+    color: var(--a);
+  }
+
+  .a-bg {
+    background-color: rgb(var(--rgb-a) / calc(0.16 * var(--a-lift)));
+  }
+
+  /* 24px contact glow -- close, tight, reads as the element being lit rather than
+     emitting. box-shadow with a zero spread so it never affects layout or hit testing. */
+  .a-glow {
+    box-shadow: 0 0 24px 0 rgb(var(--rgb-a) / calc(0.45 * var(--a-lift)));
+  }
+
+  /* 64px bloom halo -- the far falloff, on a pseudo-element so it can overflow its box
+     without a wrapper and so it composites as its own layer. Sits behind the content;
+     opacity is the only animatable property it exposes. */
+  .a-halo {
+    position: relative;
+    isolation: isolate;
+  }
+
+  .a-halo::before {
+    content: '';
+    position: absolute;
+    inset: -32px;
+    z-index: -1;
+    pointer-events: none;
+    border-radius: inherit;
+    background: radial-gradient(
+      closest-side,
+      rgb(var(--rgb-a) / calc(0.38 * var(--a-lift))),
+      rgb(var(--rgb-a) / calc(0.1 * var(--a-lift))) 55%,
+      transparent 100%
+    );
+    filter: blur(calc(var(--glass-blur) * 1.15));
+    opacity: var(--a-lift);
+  }
+
+  /* Focus ring. outline, not box-shadow: outline is painted outside the border box and
+     never participates in layout, so a focused HUD chip cannot nudge its neighbours.
+     :focus-visible only -- a pointer tap on a touch target must not leave a ring. */
+  .a-focus:focus-visible,
+  .hit:focus-visible {
+    outline: 2px solid var(--a);
+    outline-offset: 2px;
+  }
+
+  /* Meter. The fill is scaleX from a left origin because width animation is layout and
+     layout is banned in this project; --fill is 0..1 and is written by a NumVar. */
+  .meter {
+    position: relative;
+    overflow: hidden;
+    background: rgb(var(--rgb-a) / 0.1);
+    border-radius: var(--r-chip);
+  }
+
+  .meter__fill {
+    --fill: 0;
+    position: absolute;
+    inset: 0;
+    transform-origin: 0 50%;
+    transform: scaleX(var(--fill));
+    background: linear-gradient(90deg, rgb(var(--rgb-a) / 0.55), var(--a));
+    will-change: transform;
+  }
+
+  /* Seam: a 1px rule that fades out at both ends so it reads as a lit edge rather than
+     a drawn border. Used to separate HUD clusters without boxing them. */
+  .seam {
+    height: 1px;
+    border: 0;
+    margin: 0;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgb(var(--rgb-a) / calc(0.5 * var(--a-lift))) 22%,
+      rgb(var(--rgb-a) / calc(0.5 * var(--a-lift))) 78%,
+      transparent
+    );
+  }
+
+  .seam[data-vertical] {
+    height: auto;
+    width: 1px;
+    background: linear-gradient(
+      180deg,
+      transparent,
+      rgb(var(--rgb-a) / calc(0.5 * var(--a-lift))) 22%,
+      rgb(var(--rgb-a) / calc(0.5 * var(--a-lift))) 78%,
+      transparent
+    );
+  }
+
+  /* Conic timer. --t is 0..1 and is written per frame by a NumVar; a conic-gradient
+     hard stop is a paint-only change with no layout and no SVG in the tree. */
+  .timer {
+    --t: 0;
+    aspect-ratio: 1;
+    border-radius: var(--r-round);
+    background:
+      conic-gradient(from -90deg, var(--a) calc(var(--t) * 360deg), transparent 0),
+      radial-gradient(closest-side, var(--void-100) 68%, transparent 69%);
+  }
+
+  /*
+   * THE PANEL.
+   *
+   * Dark glass, 1px hair outline, one bright top edge. The top edge is a ::before rather
+   * than a border-top because a border would round with the 2px radius and lose its ends;
+   * an inset absolute line keeps a crisp, full-width highlight at any radius.
+   */
+  .glass {
+    position: relative;
+    background: var(--glass);
+    border: 1px solid var(--glass-line);
+    border-radius: var(--r-panel);
+    box-shadow: 0 12px 32px -12px var(--shadow);
+    backdrop-filter: blur(var(--glass-blur)) saturate(1.25);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.25);
+  }
+
+  .glass::before {
+    content: '';
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 1px;
+    pointer-events: none;
+    background: linear-gradient(90deg, transparent, var(--glass-edge) 18%, var(--glass-edge) 82%, transparent);
+  }
+
+  .glass[data-deep='true'] {
+    background: var(--glass-deep);
+  }
+
+  /* ------------------------------------------------------------- type roles */
+  .t-display {
+    font-family: var(--font-display-stack);
+    font-weight: 800;
+    letter-spacing: 0.01em;
+    line-height: 1.05;
+  }
+
+  .t-ui {
+    font-family: var(--font-ui-stack);
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    line-height: 1.15;
+  }
+
+  /*
+   * Anything whose glyphs change while the player is watching. Proportional digits
+   * reflow the whole readout when a 1 becomes an 8, which at 60 Hz is a shimmer the eye
+   * locks onto; tabular figures pin every digit to one advance width so a counter
+   * counts instead of wobbling. `zero` disambiguates 0 from O in ball counts.
+   */
+  .t-num {
+    font-family: var(--font-mono-stack);
+    font-variant-numeric: tabular-nums slashed-zero;
+    font-feature-settings: 'tnum' 1, 'zero' 1;
+    letter-spacing: 0;
+    line-height: 1;
+  }
+}

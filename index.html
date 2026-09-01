@@ -1,0 +1,107 @@
+<!doctype html>
+<!--
+  SHATTERPOINT - the document shell.
+
+  `data-preset` and `data-accent` are seeded here rather than left to main.ts on purpose.
+  The tier is not known until an adapter has been probed and the WebGPU device has booted,
+  which is hundreds of milliseconds after first paint; without a seed, the boot veil would
+  render with no preset at all and then jump. `desktop-high` is the seed because it is the
+  middle of the ladder, so the correction after main.ts resolves the real tier is at worst
+  one notch in either direction instead of a full-range snap.
+
+  There is not one style attribute in this file, and there must never be one: every rule
+  the shell needs is in src/styles/app.css, which means the boot veil, the canvas and the
+  overlay all obey the same tokens and the same preset collapse as the rest of the game.
+-->
+<html lang="en" data-preset="desktop-high" data-accent="ice">
+  <head>
+    <meta charset="utf-8" />
+
+    <!--
+      viewport-fit=cover is what makes env(safe-area-inset-*) return anything but zero, and
+      those insets are the entire reason the HUD clears a notch. Zoom is pinned because a
+      pinch during play is an aim gesture, not a request to magnify the page.
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+
+    <!-- Matches --void-000 and the PWA manifest's theme_color, so the browser chrome, the
+         splash and the canvas clear colour are one unbroken surface. -->
+    <meta name="theme-color" content="#05070b" />
+    <meta name="color-scheme" content="dark" />
+
+    <title>SHATTERPOINT</title>
+    <meta name="description" content="A first-person on-rails runner through corridors of breaking glass." />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+
+    <!--
+      Three roles, three families. Preconnect to both hosts because the stylesheet and the
+      font binaries come from different origins and the second connection would otherwise
+      not start until the first response had been parsed.
+
+      display=swap, not block: the fallback stacks in tokens.css are metric-similar enough
+      that a swap is a barely visible reflow, whereas a block would leave the boot veil's
+      wordmark invisible while the game is already initialising. The game is fully playable
+      with the fallback stack alone, which is what makes it safe to fail offline.
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;600&family=JetBrains+Mono:wght@400;600&family=Sora:wght@400;600;800&display=swap"
+    />
+  </head>
+
+  <body>
+    <div id="app">
+      <!--
+        No width/height attributes: the backing store is sized by the renderer from the
+        tier's render scale and is deliberately NOT the element's CSS size. Setting either
+        here would be overwritten on the first resize and would mislead anyone reading it.
+      -->
+      <canvas id="stage" aria-label="Game viewport" role="img"></canvas>
+
+      <!--
+        The screen-space half of the post chain. These four layers are composited by the
+        browser rather than resampled by the render graph, which is why they are markup and
+        not TSL nodes; src/styles/app.css explains the split and each [data-preset] block
+        shows exactly which of them survive on which tier.
+
+        Their position in this file is their position on screen: the container carries no
+        z-index at all (app.css explains why - a stacking context there would sever the
+        blend from the canvas), so paint order is DOM order, and the overlay below wins by
+        its own z-index. That leaves the vignette and the grain treating the rendered image
+        as film while the instrument cluster on top of them stays untouched - a HUD readout
+        dimmed by its own vignette is a readout the player has to squint at.
+      -->
+      <div class="fx" aria-hidden="true">
+        <div class="fx__layer fx__vignette"></div>
+        <div class="fx__layer fx__aberration"></div>
+        <div class="fx__layer fx__scanlines"></div>
+        <div class="fx__layer fx__grain"></div>
+      </div>
+
+      <!-- ui/Overlay.ts builds its layer stack inside this node. -->
+      <div id="overlay"></div>
+
+      <div id="boot" class="boot">
+        <p class="boot__word t-display">SHATTERPOINT</p>
+        <div class="boot__bar" role="presentation"></div>
+        <p class="boot__status t-ui" id="boot-status" role="status" aria-live="polite">Starting up</p>
+      </div>
+
+      <noscript>
+        <div class="noscript">
+          <p class="t-display">SHATTERPOINT</p>
+          <p class="t-ui">This game runs entirely in your browser and needs JavaScript enabled.</p>
+        </div>
+      </noscript>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
