@@ -14,6 +14,8 @@ import type { UniverseTheme } from '../universe/UniverseTheme';
 import { Playfield } from './Playfield';
 import { GLASS_NONE } from './GlassMaterial';
 import {
+  Director,
+  TUTORIAL_APPROACHES,
   BALLS_AT_START,
   BALLS_PER_CRYSTAL,
   BALL_COST_PER_THROW,
@@ -98,6 +100,30 @@ export function runSelfTest(theme: UniverseTheme, ringBudget: number): SelfTestR
   row('unbroken glass -10', beforeImpact - BALL_PENALTY_ON_IMPACT, d.balls_);
   d.dispose();
 
+  // 8. a throw at nothing legible is a rendering failure, not a player error
+  const f = makeField(theme, ringBudget);
+  f.testAdvanceTo(TUTORIAL_APPROACHES + 1);
+  f.testClearField();
+  const beforeBlind = f.balls_;
+  f.testThrow();
+  row('sub-bar target costs 0', beforeBlind, f.balls_);
+  f.dispose();
+
+  // 9. the tutorial approaches are free, and the one after them is not
+  const g = makeField(theme, ringBudget);
+  g.testAdvanceTo(1);
+  const beforeTut = g.balls_;
+  g.testThrow();
+  row('approach 1 free', beforeTut, g.balls_);
+  g.testAdvanceTo(TUTORIAL_APPROACHES);
+  g.testThrow();
+  row('approach 2 free', beforeTut, g.balls_);
+  g.testAdvanceTo(TUTORIAL_APPROACHES + 1);
+  const beforeCharged = g.balls_;
+  g.testThrow();
+  row('approach 3 charges 1', beforeCharged - BALL_COST_PER_THROW, g.balls_);
+  g.dispose();
+
   // 7. the run ends the moment the reserve empties, not a throw later
   const e = makeField(theme, ringBudget);
   let guard = 0;
@@ -109,6 +135,75 @@ export function runSelfTest(theme: UniverseTheme, ringBudget: number): SelfTestR
   e.dispose();
 
   return rows;
+}
+
+export interface DirectorRow {
+  readonly approach: number;
+  readonly panes: number;
+  readonly crystals: number;
+  readonly travelSpeed: number;
+  readonly balls: number;
+}
+
+/**
+ * Twenty planned rows from the real Director, plus ten seeded runs. The director is pure
+ * state, so this needs no renderer: it is the same object Playfield drives.
+ */
+export function runDirectorTable(): { rows: DirectorRow[]; mixedRows: number } {
+  const d = new Director();
+  const rows: DirectorRow[] = [];
+  let balls = BALLS_AT_START;
+  let mixedRows = 0;
+
+  for (let i = 0; i < 20; i++) {
+    const plan = d.nextRow();
+    // A competent-but-not-perfect player: enough to climb, not enough to never fall back.
+    const hit = i % 5 !== 4;
+    d.recordThrow(hit);
+    if (plan.approach > TUTORIAL_APPROACHES) balls -= BALL_COST_PER_THROW;
+    if (hit && plan.crystalCount > 0) balls += BALLS_PER_CRYSTAL;
+    if (plan.paneCount > 0 && plan.crystalCount > 0) mixedRows++;
+    rows.push({
+      approach: plan.approach,
+      panes: plan.paneCount,
+      crystals: plan.crystalCount,
+      travelSpeed: plan.travelSpeed,
+      balls,
+    });
+  }
+  return { rows, mixedRows };
+}
+
+/**
+ * Ten seeded runs under a deliberately poor player - 40% accuracy, below the advance bar -
+ * to prove the opening is survivable even when the player is missing more than they hit.
+ */
+export function runSeededRuns(count: number): { endedEarly: number; reached: number[] } {
+  const reached: number[] = [];
+  let endedEarly = 0;
+
+  for (let run = 0; run < count; run++) {
+    const d = new Director();
+    let balls = BALLS_AT_START;
+    let approach = 0;
+    // Vary the miss pattern per run so the ten runs are not one run repeated.
+    const missEvery = 2 + (run % 3);
+    while (balls > 0 && approach < 40) {
+      const plan = d.nextRow();
+      approach = plan.approach;
+      const hit = approach % missEvery !== 0;
+      d.recordThrow(hit);
+      if (approach > TUTORIAL_APPROACHES) balls -= BALL_COST_PER_THROW;
+      // A missed PANE row reaches the camera and costs the impact penalty.
+      if (!hit && plan.paneCount > 0 && approach > TUTORIAL_APPROACHES) {
+        balls -= BALL_PENALTY_ON_IMPACT;
+      }
+      if (hit && plan.crystalCount > 0) balls += BALLS_PER_CRYSTAL;
+    }
+    reached.push(approach);
+    if (approach < 5) endedEarly++;
+  }
+  return { endedEarly, reached };
 }
 
 /** Prints the seven rows as a table and returns true only when every one passed. */

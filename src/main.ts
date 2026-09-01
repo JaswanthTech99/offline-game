@@ -62,7 +62,7 @@ import { UNIVERSE_IDS } from './universe/UniverseTheme';
 import { getTheme } from './universe/registry';
 import { RING_LAYOUT } from './corridor/Rings';
 import { Playfield } from './gameplay/Playfield';
-import { reportSelfTest, runSelfTest } from './gameplay/SelfTest';
+import { reportSelfTest, runDirectorTable, runSeededRuns, runSelfTest } from './gameplay/SelfTest';
 import type { SelfTestRow } from './gameplay/SelfTest';
 import { asSeed } from './core/types';
 import type { Seed, Unit } from './core/types';
@@ -324,7 +324,26 @@ async function boot(shell: Shell): Promise<App> {
   if (params.get('selftest') === '1') {
     const rows = runSelfTest(theme, quality.budget.corridorRings);
     const ok = reportSelfTest(rows);
-    window.__spSelfTest = { rows, pass: ok };
+
+    const table = runDirectorTable();
+    const lines = table.rows.map(
+      (r) =>
+        `    approach ${String(r.approach).padStart(2)}  panes ${r.panes}  crystals ${r.crystals}` +
+        `  speed ${String(r.travelSpeed).padStart(2)}  balls ${String(r.balls).padStart(3)}`,
+    );
+    console.info(
+      `[shatterpoint] director - 20 rows\n${lines.join('\n')}\n` +
+        `    rows containing BOTH a pane and a crystal: ${table.mixedRows}  ` +
+        `${table.mixedRows === 0 ? 'PASS' : 'FAIL'}`,
+    );
+
+    const runs = runSeededRuns(10);
+    console.info(
+      `[shatterpoint] 10 seeded runs - approaches reached: ${runs.reached.join(', ')}\n` +
+        `    runs ending before approach 5: ${runs.endedEarly}  ${runs.endedEarly === 0 ? 'PASS' : 'FAIL'}`,
+    );
+
+    window.__spSelfTest = { rows, pass: ok && table.mixedRows === 0 && runs.endedEarly === 0 };
   }
 
   say(shell, 'Raising the corridor');
@@ -364,6 +383,12 @@ async function boot(shell: Shell): Promise<App> {
     },
   });
   engine.subscribe(playfield, ORDER.corridor);
+  // The legibility bar is measured in DEVICE pixels, so it needs the drawing buffer height
+  // rather than the CSS height - a 2x supersampled frame resolves twice the detail.
+  playfield.setViewportPx(engine.renderer.getDrawingBufferSize(new Vector2()).y);
+  engine.events.on('engine:resize', () => {
+    playfield.setViewportPx(engine.renderer.getDrawingBufferSize(new Vector2()).y);
+  });
 
   // TODO(step-2): the mote system and the key light. The light is what the godrays stage
   // marches through, so passing null below is not a placeholder: it is the correct value
@@ -538,10 +563,16 @@ async function boot(shell: Shell): Promise<App> {
       pickups: [],
       target: runOver
         ? { state: 'idle', label: 'run over', rangeM: 0 }
-        : { state: 'tracking', label: 'glass', rangeM: playfield.travelMetres },
+        : {
+            state: 'tracking',
+            label: playfield.isTutorial ? 'tutorial' : `approach ${String(playfield.approach)}`,
+            rangeM: playfield.travelMetres,
+          },
       danger: runOver
         ? { level: 'critical', message: 'Out of balls - click, Space or R to retry' }
-        : ballsNow <= LOW_BALL_WARNING
+        : playfield.isTutorial
+          ? { level: 'warn', message: 'Tutorial - throws are free' }
+          : ballsNow <= LOW_BALL_WARNING
           ? { level: 'warn', message: 'Low on balls' }
           : { level: 'none', message: '' },
       telemetry: {

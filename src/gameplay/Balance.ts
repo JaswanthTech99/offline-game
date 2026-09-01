@@ -99,6 +99,202 @@ export const streakFloorForMultiplier = (multiplier: number): number => {
   return (rung < 0 ? 0 : rung) * HITS_PER_MULTIPLIER_STEP;
 };
 
+/* ---------------------------------------------------------------------------- director */
+
+/**
+ * The difficulty director. The run used to open with three panes at speed 17 and end on
+ * approach 1; the ramp below is the fix, and every number in it lives here.
+ *
+ * A step is a difficulty rung, not a room count: the player climbs when they are hitting
+ * and falls back when they are not, so the ramp follows ability rather than the clock.
+ */
+export interface DirectorStep {
+  /** Earliest approach this rung may be reached at. */
+  readonly minApproach: number;
+  readonly paneCount: number;
+  readonly travelSpeed: number;
+}
+
+export const TRAVEL_SPEED_BASE = 9;
+/** Hard ceiling. The old build ran at 17 from the first row and could reach 22. */
+export const TRAVEL_SPEED_CEILING = 17;
+
+export const DIRECTOR_STEPS: readonly DirectorStep[] = Object.freeze([
+  { minApproach: 1, paneCount: 1, travelSpeed: TRAVEL_SPEED_BASE },
+  { minApproach: 5, paneCount: 2, travelSpeed: 12 },
+  { minApproach: 11, paneCount: 3, travelSpeed: TRAVEL_SPEED_CEILING },
+]);
+
+/** Rolling window the advance decision is made over. */
+export const ACCURACY_WINDOW = 5;
+export const ACCURACY_TO_ADVANCE = 0.6;
+export const MISSES_TO_DROP = 3;
+
+/**
+ * Crystals get their OWN rows. A crystal sharing a row with a square pane is the specific
+ * thing that made the game unplayable: the two read alike at speed and the player has no
+ * way to tell which one they must not hit.
+ */
+export const CRYSTAL_ROW_PERIOD = 3;
+/** No crystals at all while the player is still learning to hit anything. */
+export const CRYSTAL_FIRST_APPROACH = 3;
+/** Throws are free while these approaches are active. */
+export const TUTORIAL_APPROACHES = 2;
+
+/**
+ * The legibility bar. A target smaller than this on screen is not something the player
+ * failed to hit - it is something the renderer failed to show, and a rendering defect must
+ * never be allowed to take a ball. Expressed in device pixels of projected height.
+ */
+export const LEGIBLE_MIN_SCREEN_PX = 14;
+
+/** Beyond this a target is scenery, whatever its projected size says. */
+export const LEGIBLE_MAX_RANGE_M = 120;
+
+/** A crystal never projects smaller than this; below it the facets stop resolving. */
+export const CRYSTAL_MIN_SCREEN_PX = 26;
+/** Ceiling on the size floor, so a very distant crystal does not become a billboard. */
+export const CRYSTAL_MAX_SCALE_BOOST = 3.2;
+
+/**
+ * Projected height in device pixels of an object `sizeM` tall at `distanceM`, for a camera
+ * of `fovYDeg` on a viewport `viewportPx` tall.
+ */
+export function projectedHeightPx(
+  sizeM: number,
+  distanceM: number,
+  fovYDeg: number,
+  viewportPx: number,
+): number {
+  if (distanceM <= 0) return viewportPx;
+  const tanHalf = Math.tan((fovYDeg * Math.PI) / 360);
+  return (sizeM / distanceM / (2 * tanHalf)) * viewportPx;
+}
+
+export function isLegible(
+  sizeM: number,
+  distanceM: number,
+  fovYDeg: number,
+  viewportPx: number,
+): boolean {
+  if (distanceM > LEGIBLE_MAX_RANGE_M) return false;
+  return projectedHeightPx(sizeM, distanceM, fovYDeg, viewportPx) >= LEGIBLE_MIN_SCREEN_PX;
+}
+
+export type RowKind = 'panes' | 'crystal';
+
+export interface RowPlan {
+  readonly approach: number;
+  readonly kind: RowKind;
+  readonly paneCount: number;
+  readonly crystalCount: number;
+  readonly travelSpeed: number;
+}
+
+/**
+ * Mutable ramp state. Kept beside its constants rather than in Playfield so the self-test
+ * can drive the real director without standing up a renderer.
+ */
+export class Director {
+  private stepIndex = 0;
+  /**
+   * Rows PLANNED, which runs ahead of the player: the field pre-spawns several rows so the
+   * corridor is populated before the run starts.
+   */
+  private plannedIndex = 0;
+  /**
+   * The approach the player is actually ON, advanced when a row reaches them. These must be
+   * separate: keying the tutorial to planned rows meant it had already expired at row one,
+   * because eight rows are spawned before the player has passed any.
+   */
+  private approachIndex = 0;
+  private consecutiveMisses = 0;
+  private readonly window: boolean[] = [];
+
+  /** 0 before the player has reached anything; 1 on the first approach. */
+  get approach(): number {
+    return this.approachIndex;
+  }
+
+  get plannedRows(): number {
+    return this.plannedIndex;
+  }
+
+  /** Called when a planned row reaches the player. */
+  arrive(): void {
+    this.approachIndex += 1;
+  }
+
+  get step(): DirectorStep {
+    return DIRECTOR_STEPS[this.stepIndex] ?? (DIRECTOR_STEPS[0] as DirectorStep);
+  }
+
+  get travelSpeed(): number {
+    return Math.min(this.step.travelSpeed, TRAVEL_SPEED_CEILING);
+  }
+
+  /** True while throws are free and the HUD should say so. */
+  get isTutorial(): boolean {
+    return this.approach <= TUTORIAL_APPROACHES;
+  }
+
+  get accuracy(): number {
+    if (this.window.length === 0) return 1;
+    return this.window.filter(Boolean).length / this.window.length;
+  }
+
+  recordThrow(hit: boolean): void {
+    this.window.push(hit);
+    while (this.window.length > ACCURACY_WINDOW) this.window.shift();
+    this.consecutiveMisses = hit ? 0 : this.consecutiveMisses + 1;
+
+    if (this.consecutiveMisses >= MISSES_TO_DROP) {
+      this.stepIndex = Math.max(0, this.stepIndex - 1);
+      this.consecutiveMisses = 0;
+      this.window.length = 0;
+    }
+  }
+
+  /** Plans the next row and advances the approach counter. */
+  nextRow(): RowPlan {
+    this.plannedIndex += 1;
+    const approach = this.plannedIndex;
+
+    // Climb only on demonstrated accuracy, and never past the rung this approach allows.
+    const next = DIRECTOR_STEPS[this.stepIndex + 1];
+    if (
+      next !== undefined &&
+      approach >= next.minApproach &&
+      this.window.length >= ACCURACY_WINDOW &&
+      this.accuracy >= ACCURACY_TO_ADVANCE
+    ) {
+      this.stepIndex += 1;
+      this.window.length = 0;
+    }
+
+    const crystalRow =
+      approach >= CRYSTAL_FIRST_APPROACH && approach % CRYSTAL_ROW_PERIOD === 0;
+
+    return crystalRow
+      ? { approach, kind: 'crystal', paneCount: 0, crystalCount: 1, travelSpeed: this.travelSpeed }
+      : {
+          approach,
+          kind: 'panes',
+          paneCount: this.step.paneCount,
+          crystalCount: 0,
+          travelSpeed: this.travelSpeed,
+        };
+  }
+
+  reset(): void {
+    this.stepIndex = 0;
+    this.plannedIndex = 0;
+    this.approachIndex = 0;
+    this.consecutiveMisses = 0;
+    this.window.length = 0;
+  }
+}
+
 /* ------------------------------------------------------------------------- forward motion */
 
 export const BASE_SPEED_UNITS_PER_SEC = 22;

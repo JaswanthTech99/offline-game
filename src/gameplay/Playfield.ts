@@ -24,6 +24,7 @@ import {
   AdditiveBlending,
   MeshBasicNodeMaterial,
   MeshStandardNodeMaterial,
+  ConeGeometry,
   OctahedronGeometry,
   PerspectiveCamera,
   PlaneGeometry,
@@ -43,11 +44,13 @@ import {
   positionView,
   pow,
   smoothstep,
+  uv,
   vec3,
 } from 'three/tsl';
 import { FIXED_STEP_MS } from '../core/Quality';
 import { ShatterFx } from './ShatterFx';
 import type { ShatterPhase } from './ShatterFx';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { createRng } from '../battle/Rng';
 import { glassMaterial } from './GlassMaterial';
 import type { GlassFeatures } from './GlassMaterial';
@@ -58,13 +61,22 @@ import {
   BALL_PENALTY_ON_IMPACT,
   BALLS_MAX,
   BALLS_PER_CRYSTAL,
+  CRYSTAL_MAX_SCALE_BOOST,
+  CRYSTAL_MIN_SCREEN_PX,
+  Director,
+  isLegible,
+  projectedHeightPx,
   multiplierForStreak,
 } from './Balance';
+import type { RowPlan } from './Balance';
 
 /**
  * Geometry and feel. Separate from Quality.ts on purpose: these are level-design numbers,
  * not performance budgets, and they are the ones a designer wants to move.
  */
+/** Lights on this layer illuminate crystals and nothing else. */
+const CRYSTAL_LAYER = 2;
+
 const TUNING = Object.freeze({
   corridorHalfWidth: 5,
   corridorHalfHeight: 3.4,
@@ -72,7 +84,8 @@ const TUNING = Object.freeze({
   despawnBehind: 6,
   rowSpacing: 26,
   rowsAhead: 8,
-  travelSpeed: 17,
+  /** Fallback only. The live value comes from the director in Balance.ts. */
+  travelSpeed: 9,
   ballSpeed: 78,
   gravity: -13,
   ballRadius: 0.34,
@@ -112,6 +125,8 @@ interface Target {
   live: boolean;
   /** Panes only: how many more hits it takes. Laminated glass is 2. */
   hits: number;
+  /** Set once the target crossed the legibility bar. Latched, never cleared. */
+  wasLegible: boolean;
 }
 
 export interface PlayfieldEvents {
@@ -152,17 +167,46 @@ export class Playfield implements Tickable, Disposable {
 
   private readonly paneGeometry = new PlaneGeometry(TUNING.paneWidth, TUNING.paneHeight);
   private readonly ballGeometry = new SphereGeometry(TUNING.ballRadius, 20, 14);
-  private readonly crystalGeometry = new OctahedronGeometry(TUNING.crystalRadius, 0);
+  /**
+   * An 8-facet dipyramid with FLAT per-facet normals. An OctahedronGeometry with smooth
+   * normals shades as a sphere and reads as a flat aliased card at distance - the facets
+   * are the whole point, because each one has to catch the key at a different value.
+   */
+  private readonly crystalGeometry = (() => {
+    // Radius-to-zero cone, mirrored: a true 8-sided dipyramid. Non-indexed so every facet
+    // owns its vertices and therefore its own flat normal.
+    const top = new ConeGeometry(TUNING.crystalRadius, TUNING.crystalRadius * 1.5, 8, 1, true);
+    const bottom = top.clone();
+    bottom.rotateX(Math.PI);
+    const merged = mergeGeometries([top, bottom], false) ?? top.toNonIndexed();
+    bottom.dispose();
+    if (merged !== top) top.dispose();
+    const flat = merged.toNonIndexed();
+    if (flat !== merged) merged.dispose();
+    flat.computeVertexNormals();
+    return flat;
+  })();
+  private readonly crystalCoreGeometry = new OctahedronGeometry(TUNING.crystalRadius * 0.52, 0);
+  private readonly crystalHaloGeometry = new PlaneGeometry(
+    TUNING.crystalRadius * 4,
+    TUNING.crystalRadius * 4,
+  );
   private readonly causticGeometry = new PlaneGeometry(TUNING.paneWidth * 1.5, TUNING.paneWidth * 1.5);
 
   private readonly paneMaterial: MeshStandardNodeMaterial;
   private readonly paneCrackedMaterial: MeshStandardNodeMaterial;
   private readonly decorativeMaterial: MeshStandardNodeMaterial;
   private readonly ballMaterial: MeshStandardNodeMaterial;
-  private readonly crystalMaterial: MeshBasicNodeMaterial;
+  private readonly crystalMaterial: MeshStandardNodeMaterial;
+  private readonly crystalCoreMaterial: MeshBasicNodeMaterial;
+  private readonly crystalHaloMaterial: MeshBasicNodeMaterial;
   private readonly causticMaterial: MeshBasicNodeMaterial | null;
   private readonly caustics: Mesh[] = [];
   private readonly fx: ShatterFx;
+  private readonly director = new Director();
+  private lastPlan: RowPlan | null = null;
+  /** Device pixels of viewport height, for the legibility projection. */
+  private viewportPx = 720;
   private readonly ribMaterial: MeshStandardNodeMaterial;
   private readonly wallMaterial: MeshStandardNodeMaterial;
 
@@ -272,10 +316,23 @@ export class Playfield implements Tickable, Disposable {
     // surfaces around it - it is meant to be one of the few things that reaches full white.
     // Scaled off the clipping point: unclamped it blooms to pure white at the vanishing
     // point, and pure white is reserved for the single shatter flash frame.
-    this.crystalMaterial = new MeshBasicNodeMaterial({
-      color: new Color().copy(t.emissive.primary).multiplyScalar(0.78),
+    // Standard, not Basic: a Basic material is unlit and every facet returns the same
+    // value, which is exactly the flat-card read. Lit + flat normals gives eight different
+    // values around the hull.
+    this.crystalMaterial = new MeshStandardNodeMaterial({
+      color: new Color().copy(t.emissive.primary).multiplyScalar(0.95),
+      // Low emissive on purpose: an emissive-dominated hull returns the same value on every
+      // facet and collapses back into the flat card this rebuild exists to fix. The facet
+      // contrast has to come from the KEY, so the lit term must dominate.
+      emissive: new Color().copy(t.emissive.primary).multiplyScalar(0.12),
       transparent: true,
-      opacity: 0.92,
+      opacity: 1,
+      roughness: 0.30,
+      // ZERO metalness. There is no environment map in this scene, so a metallic surface
+      // has nothing to reflect and returns near-black - which is why the hull disappeared
+      // behind its own halo and the crystal read as a glow instead of a solid.
+      metalness: 0,
+      flatShading: true,
     });
     this.ribMaterial = new MeshStandardNodeMaterial({
       color: new Color().copy(t.metal),
@@ -339,6 +396,29 @@ export class Playfield implements Tickable, Disposable {
       paneHeight: TUNING.paneHeight,
     });
 
+    // An emissive core INSIDE the hull, seen through it. This is what stops a crystal
+    // reading as an outline: the interior has a value of its own.
+    this.crystalCoreMaterial = new MeshBasicNodeMaterial({
+      color: new Color().copy(t.emissive.primary),
+      transparent: true,
+      opacity: 0.55,
+      blending: AdditiveBlending,
+      depthWrite: false,
+    });
+    // A soft halo at ~2x hull radius. Its job is to give the silhouette a GRADIENT, so SMAA
+    // has something to resolve instead of a hard one-pixel step - which is what "prisms are
+    // pixel low" actually was: aliasing on a flat quad, not a resolution shortfall.
+    this.crystalHaloMaterial = new MeshBasicNodeMaterial({
+      color: new Color().copy(t.emissive.primary),
+      transparent: true,
+      blending: AdditiveBlending,
+      depthWrite: false,
+    });
+    {
+      const r = uv().sub(0.5).length().mul(2);
+      this.crystalHaloMaterial.opacityNode = smoothstep(float(1), float(0), r).mul(float(0.13));
+    }
+
     this.buildShell();
 
     // FOUR light contributions, not one blob.
@@ -347,6 +427,18 @@ export class Playfield implements Tickable, Disposable {
     this.keyLight = new PointLight(new Color(0.72, 0.84, 1.0), 13, 48, 2.0);
     this.keyLight.position.set(0, 0.8, -22);
     this.root.add(this.keyLight);
+
+    // A dedicated crystal key, offset from the corridor axis so the eight facets return
+    // eight different values instead of a symmetric wash.
+    //
+    // Confined to CRYSTAL_LAYER. Unconfined it also lit everything else near the camera and
+    // blew a decorative pane at 10m to 100% luma, which broke the target/scenery read that
+    // the whole legibility pass exists to protect. A light that only one kind of object can
+    // see is the correct tool here, not a dimmer light.
+    const crystalKey = new PointLight(new Color(1, 1, 1), 26, 70, 1.2);
+    crystalKey.position.set(3.2, 2.4, 2);
+    crystalKey.layers.set(CRYSTAL_LAYER);
+    this.root.add(crystalKey);
 
     // 2. Cool bounce off the floor plates, upward onto the underside of everything.
     this.bounceLight = new PointLight(new Color(1.0, 0.86, 0.68), 9, 34, 1.5);
@@ -551,33 +643,44 @@ export class Playfield implements Tickable, Disposable {
 
   // ---- spawning -----------------------------------------------------------------------
 
-  private spawnRow(): void {
+  /**
+   * One row, planned by the director. A row is EITHER panes OR a crystal and never both -
+   * a crystal sharing a row with a square pane reads identically at speed, and the player
+   * has no way to tell the one they must hit from the one they must not.
+   */
+  private spawnRow(): RowPlan {
+    const plan = this.director.nextRow();
     const z = this.nextRowZ - TUNING.rowSpacing;
     this.nextRowZ = z;
+    this.lastPlan = plan;
 
-    // One row is a short wall of panes with a gap, plus an occasional crystal in the gap.
-    // The gap is what makes the row a decision rather than a wall to grind through.
-    const columns = 3;
-    const gap = Math.floor(this.rng.next() * columns);
-    for (let c = 0; c < columns; c++) {
-      const x = (c - (columns - 1) / 2) * (TUNING.paneWidth + 0.12);
-      if (c === gap) {
-        if (this.rng.next() < 0.55) this.spawnCrystal(x, this.rng.next() * 2 - 1, z);
-        continue;
-      }
+    if (plan.kind === 'crystal') {
+      // Its own row, dead centre, nothing to confuse it with.
+      this.spawnCrystal(0, (this.rng.next() - 0.5) * 1.2, z);
+      return plan;
+    }
+
+    const n = plan.paneCount;
+    for (let c = 0; c < n; c++) {
+      // A single pane sits in the centre lane; two or three spread symmetrically.
+      const x = n === 1 ? 0 : (c - (n - 1) / 2) * (TUNING.paneWidth + 0.55);
       const yJitter = (this.rng.next() - 0.5) * 1.2;
       this.spawnPane(x, yJitter, z, this.rng.next() < 0.22 ? 2 : 1);
-      // A decorative pane in the same row, so the player is constantly having to tell a
-      // target from scenery. If that read ever fails, the reserved-hue rule has failed.
-      if (this.rng.next() < 0.5) this.spawnDecorative(x, yJitter + 2.1, z);
     }
+    // Decorative glass lives on the walls, well clear of the firing lane, so it can never
+    // be mistaken for the row the player is actually solving.
+    if (this.rng.next() < 0.5) {
+      const side = this.rng.next() < 0.5 ? -1 : 1;
+      this.spawnDecorative(side * (TUNING.corridorHalfWidth - 0.6), (this.rng.next() - 0.5) * 2, z);
+    }
+    return plan;
   }
 
   private acquireTarget(): Target | null {
     for (const target of this.targets) if (!target.live) return target;
     if (this.targets.length > 96) return null;
     const mesh = new Mesh(this.paneGeometry, this.paneMaterial);
-    const created: Target = { mesh, kind: 'pane', live: false, hits: 1 };
+    const created: Target = { mesh, kind: 'pane', live: false, hits: 1, wasLegible: false };
     this.root.add(mesh);
     this.targets.push(created);
     return created;
@@ -588,6 +691,7 @@ export class Playfield implements Tickable, Disposable {
     if (target === null) return;
     target.kind = 'pane';
     target.hits = hits;
+    target.wasLegible = false;
     target.live = true;
     target.mesh.geometry = this.paneGeometry;
     target.mesh.material = hits > 1 ? this.paneCrackedMaterial : this.paneMaterial;
@@ -595,6 +699,7 @@ export class Playfield implements Tickable, Disposable {
     target.mesh.rotation.set(0, 0, 0);
     target.mesh.position.set(x, y, z);
     target.mesh.visible = true;
+    this.hideCrystalRig(target);
     this.attachCaustic(target);
   }
 
@@ -618,6 +723,7 @@ export class Playfield implements Tickable, Disposable {
     if (target === null) return;
     target.kind = 'decorative';
     target.hits = 0;
+    target.wasLegible = false;
     target.live = true;
     target.mesh.geometry = this.paneGeometry;
     target.mesh.material = this.decorativeMaterial;
@@ -627,17 +733,41 @@ export class Playfield implements Tickable, Disposable {
     target.mesh.visible = true;
   }
 
+  /** Attaches the core and halo once, then shows them only while the target is a crystal. */
+  private rigCrystal(target: Target): void {
+    let core = target.mesh.children[0];
+    if (core === undefined) {
+      core = new Mesh(this.crystalCoreGeometry, this.crystalCoreMaterial);
+      target.mesh.add(core);
+      const halo = new Mesh(this.crystalHaloGeometry, this.crystalHaloMaterial);
+      halo.renderOrder = -1;
+      target.mesh.add(halo);
+    }
+    for (const child of target.mesh.children) {
+      child.visible = true;
+      child.layers.enable(CRYSTAL_LAYER);
+    }
+  }
+
+  private hideCrystalRig(target: Target): void {
+    for (const child of target.mesh.children) child.visible = false;
+    target.mesh.layers.disable(CRYSTAL_LAYER);
+  }
+
   private spawnCrystal(x: number, y: number, z: number): void {
     const target = this.acquireTarget();
     if (target === null) return;
     target.kind = 'crystal';
     target.hits = 1;
+    target.wasLegible = false;
     target.live = true;
     target.mesh.geometry = this.crystalGeometry;
     target.mesh.material = this.crystalMaterial;
     target.mesh.scale.set(1, 1, 1);
     target.mesh.position.set(x, y, z);
     target.mesh.visible = true;
+    this.rigCrystal(target);
+    target.mesh.layers.enable(CRYSTAL_LAYER);
   }
 
   // ---- input --------------------------------------------------------------------------
@@ -660,7 +790,11 @@ export class Playfield implements Tickable, Disposable {
     ball.live = true;
     ball.mesh.visible = true;
 
-    this.spendBall(BALL_COST_PER_THROW);
+    // Two reasons a throw is free: the tutorial approaches, and a field with nothing
+    // legible on it. Neither is the player spending a ball badly.
+    if (!this.director.isTutorial && this.hasLegibleTarget()) {
+      this.spendBall(BALL_COST_PER_THROW);
+    }
   }
 
   private liveBallCount(): number {
@@ -730,10 +864,10 @@ export class Playfield implements Tickable, Disposable {
     // still for a measurement, and the hit-stop holds it for the break - neither is a
     // reason to stop the flash, the dust or the shards, which own their own clocks.
     const worldHeld = this.over || this.frozen || this.fx.holding;
-    if (!this.frozen) this.fx.update(dtMs, worldHeld ? 0 : TUNING.travelSpeed * dt);
+    if (!this.frozen) this.fx.update(dtMs, worldHeld ? 0 : this.director.travelSpeed * dt);
     if (worldHeld) return;
 
-    this.travel += TUNING.travelSpeed * dt;
+    this.travel += this.director.travelSpeed * dt;
     this.spinPhase += dt * TUNING.crystalSpinRate;
 
     // Very low amplitude, two incommensurable periods so it never visibly repeats.
@@ -750,7 +884,7 @@ export class Playfield implements Tickable, Disposable {
 
   /** Everything static moves toward the camera; the camera itself never translates. */
   private advanceWorld(dt: number): void {
-    const step = TUNING.travelSpeed * dt;
+    const step = this.director.travelSpeed * dt;
 
     // Rings recycle rather than respawn: the corridor is a treadmill of fixed geometry.
     // The whole corridor is one transform. Wrapping at the full field length rather than
@@ -783,14 +917,25 @@ export class Playfield implements Tickable, Disposable {
       if (target.kind === 'crystal') {
         target.mesh.rotation.y = this.spinPhase;
         target.mesh.rotation.x = this.spinPhase * 0.6;
+        // Minimum on-screen size. A crystal that projects below the floor is scaled up
+        // until it does, so a distant one never collapses into a couple of pixels.
+        const dist = Math.abs(target.mesh.position.z - this.camera.position.z);
+        const px = projectedHeightPx(TUNING.crystalRadius * 2, dist, this.camera.fov, this.viewportPx);
+        const boost = px < CRYSTAL_MIN_SCREEN_PX ? CRYSTAL_MIN_SCREEN_PX / Math.max(px, 0.5) : 1;
+        target.mesh.scale.setScalar(Math.min(boost, CRYSTAL_MAX_SCALE_BOOST));
+        const halo = target.mesh.children[1];
+        if (halo !== undefined) halo.quaternion.copy(this.camera.quaternion);
       }
       deepest = Math.min(deepest, target.mesh.position.z);
+      if (!target.wasLegible && this.targetIsLegible(target)) target.wasLegible = true;
 
       if (target.mesh.position.z > TUNING.despawnBehind) {
         // A pane that reaches you unbroken is the only thing that really hurts.
-        if (target.kind === 'pane') {
+        if (target.kind === 'pane') this.director.arrive();
+        if (target.kind === 'pane' && !this.director.isTutorial) {
           this.breakStreak();
-          this.spendBall(BALL_PENALTY_ON_IMPACT);
+          // Only a pane that was legible on approach may charge the impact penalty.
+          if (target.wasLegible) this.spendBall(BALL_PENALTY_ON_IMPACT);
         }
         target.live = false;
         target.mesh.visible = false;
@@ -819,7 +964,7 @@ export class Playfield implements Tickable, Disposable {
       // The world slides toward the camera, so a ball has to slide with it or it would
       // appear to drift backwards through the corridor it was thrown down.
       ball.mesh.position.addScaledVector(ball.velocity, dt);
-      ball.mesh.position.z += TUNING.travelSpeed * dt;
+      ball.mesh.position.z += this.director.travelSpeed * dt;
       ball.ageMs += dt * 1000;
 
       if (lit === null) lit = ball;
@@ -832,7 +977,10 @@ export class Playfield implements Tickable, Disposable {
         Math.abs(p.x) > TUNING.corridorHalfWidth ||
         Math.abs(p.y) > TUNING.corridorHalfHeight;
       if (out) {
-        if (ball.ageMs > TUNING.ballLifetime || p.z > TUNING.despawnBehind) this.breakStreak();
+        if (ball.ageMs > TUNING.ballLifetime || p.z > TUNING.despawnBehind) {
+          this.breakStreak();
+          this.director.recordThrow(false);
+        }
         ball.live = false;
         ball.mesh.visible = false;
       }
@@ -877,9 +1025,11 @@ export class Playfield implements Tickable, Disposable {
         // Laminated: first hit only cracks it, and it says so by changing material.
         target.mesh.material = this.paneCrackedMaterial;
         this.registerHit(20);
+        this.director.recordThrow(true);
       } else {
         this.fx.burst(q, FIXED_STEP_MS);
         this.registerHit(100);
+        this.director.recordThrow(true);
         target.live = false;
         target.mesh.visible = false;
       }
@@ -933,6 +1083,42 @@ export class Playfield implements Tickable, Disposable {
     return this.travel;
   }
 
+  /**
+   * Is this target something the player could actually see and aim at? A target below the
+   * bar is a rendering failure, not a player error, and is barred from taking a ball.
+   */
+  private targetIsLegible(target: Target): boolean {
+    const distance = Math.abs(target.mesh.position.z - this.camera.position.z);
+    const size = target.kind === 'crystal' ? TUNING.crystalRadius * 2 : TUNING.paneHeight;
+    return isLegible(size, distance, this.camera.fov, this.viewportPx);
+  }
+
+  /** True when at least one legible target is on the field. */
+  private hasLegibleTarget(): boolean {
+    for (const t of this.targets) {
+      if (!t.live || t.kind === 'decorative') continue;
+      if (this.targetIsLegible(t)) return true;
+    }
+    return false;
+  }
+
+  /** What the director planned for the most recent row. Read by the self-test table. */
+  get currentPlan(): RowPlan | null {
+    return this.lastPlan;
+  }
+
+  get approach(): number {
+    return this.director.approach;
+  }
+
+  get travelSpeedNow(): number {
+    return this.director.travelSpeed;
+  }
+
+  get isTutorial(): boolean {
+    return this.director.isTutorial;
+  }
+
   get isOver(): boolean {
     return this.over;
   }
@@ -955,6 +1141,7 @@ export class Playfield implements Tickable, Disposable {
     this.multiplier = 1;
     this.over = false;
     this.nextRowZ = 0;
+    this.director.reset();
     for (let i = 0; i < TUNING.rowsAhead; i++) this.spawnRow();
 
     this.publishBalls();
@@ -998,7 +1185,7 @@ export class Playfield implements Tickable, Disposable {
    * legibility gate needs a controlled subject: measuring a rim against whatever happened
    * to be behind it in a procedural row proves nothing.
    */
-  testPlaceOnly(kind: 'pane' | 'decorative', distanceM: number, offsetX = 0): void {
+  testPlaceOnly(kind: 'pane' | 'decorative' | 'crystal', distanceM: number, offsetX = 0): void {
     for (const t of this.targets) { t.live = false; t.mesh.visible = false; }
     for (const pool of this.caustics) pool.visible = false;
     this.frozen = true;
@@ -1006,11 +1193,33 @@ export class Playfield implements Tickable, Disposable {
     // aperture glow directly behind the pane, and a max-luma read then measures the aperture
     // rather than the pane - which is what reported invisible scenery at 100% luma.
     if (kind === 'pane') this.spawnPane(offsetX, 0, -distanceM, 1);
+    else if (kind === 'crystal') this.spawnCrystal(offsetX, 0, -distanceM);
     else this.spawnDecorative(offsetX, 0, -distanceM);
   }
 
   /** Stops the treadmill so a measurement is not racing the corridor. */
   private frozen = false;
+
+  /** Viewport height in device pixels. Feeds the legibility projection. */
+  setViewportPx(px: number): void {
+    this.viewportPx = Math.max(1, px);
+  }
+
+  /** A throw down the REAL path, so tutorial and legibility rules apply as they ship. */
+  testThrow(): void {
+    this.throwAt(0, 0);
+  }
+
+  /** Plans rows until the director reaches `approach`, without spawning anything. */
+  testAdvanceTo(approach: number): void {
+    while (this.director.approach < approach) this.director.arrive();
+  }
+
+  /** Clears the field entirely - nothing legible, nothing hittable. */
+  testClearField(): void {
+    for (const t of this.targets) { t.live = false; t.mesh.visible = false; }
+    this.frozen = true;
+  }
 
   testMiss(): void {
     this.breakStreak();
@@ -1026,6 +1235,10 @@ export class Playfield implements Tickable, Disposable {
     this.paneCrackedMaterial.dispose();
     this.ballMaterial.dispose();
     this.crystalMaterial.dispose();
+    this.crystalCoreMaterial.dispose();
+    this.crystalHaloMaterial.dispose();
+    this.crystalCoreGeometry.dispose();
+    this.crystalHaloGeometry.dispose();
     this.causticMaterial?.dispose();
     this.causticGeometry.dispose();
     this.fx.dispose();
