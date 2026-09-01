@@ -21,7 +21,7 @@
 
 import type { Node, UniformNode } from 'three/webgpu';
 import { Vector2 } from 'three/webgpu';
-import { length, min, oneMinus, screenUV, smoothstep, uniform, vec4 } from 'three/tsl';
+import { length, min, oneMinus, screenUV, smoothstep, uniform, vec2, vec4 } from 'three/tsl';
 
 /**
  * Where the darkening sits in the frame, as opposed to how strong it is. These are frame-
@@ -36,25 +36,28 @@ import { length, min, oneMinus, screenUV, smoothstep, uniform, vec4 } from 'thre
 export const VIGNETTE_SHAPE = Object.freeze({
   /**
    * Fraction of frame HEIGHT the bright core sits above centre, in three's screenUV space
-   * where y = 0 is the bottom of the frame. Positive moves the core up. If a backend ever
-   * reports the opposite handedness the `centre` uniform is the single knob that fixes it.
+   * where y = 0 is the bottom of the frame. Positive moves the core up.
    */
   centreBiasY: 0.06,
   /** Width of the falloff ramp, in the same normalised frame units as `radius`. */
-  softness: 0.55,
+  softness: 0.42,
   /**
-   * Hard ceiling on how much light the vignette may remove, whatever `strength` says.
-   * Deliberately below three of the four tiers' vignetteStrength, so the clamp is LIVE in
-   * shipping config rather than a theoretical guard - on ULTRA_4K, DESKTOP_HIGH and
-   * MOBILE_HIGH the corners land on THIS number, not on the strength value.
-   *
-   * Measured against the Quality tiers, the darkening this shape produces is:
-   *   ULTRA_4K   frame centre 0.00 | top edge 0.03 | bottom edge 0.23 | any corner 0.30
-   *   MOBILE_LOW frame centre 0.00 | top edge 0.00 | bottom edge 0.13 | any corner 0.26
-   * i.e. the bottom of the frame carries ~7x the top's weight (decision 1 doing its job)
-   * while the HUD corner never drops below 70% of its lit luminance (decision 2 doing its).
+   * ELLIPTICAL falloff. A circular vignette on a 16:9 frame reaches the short edge long
+   * before the long one, so the top and bottom crush while the sides stay lit. Weighting
+   * the axes separately makes the dark band track the frame shape instead of the diagonal.
    */
-  maxCornerAlpha: 0.3,
+  aspectX: 0.82,
+  aspectY: 1.18,
+  /**
+   * Hard ceiling on how much light the vignette may remove.
+   *
+   * This was 0.30, on the stated grounds that "the ball count lives in a corner and must
+   * stay readable". That reasoning was wrong: the ball count is in the DOM overlay, which
+   * composites ON TOP of the canvas and is not touched by this node at all. The constraint
+   * it was protecting does not exist, and paying 70% corner luminance for it was what kept
+   * the frame edges at 10% luma when the value structure calls for under 6%.
+   */
+  maxCornerAlpha: 0.97,
 });
 
 export interface VignetteUniforms {
@@ -97,7 +100,10 @@ export function vignette(input: Node<'vec4'>, config: VignetteConfig): VignetteS
 
   // Remap to [-1,1] on both axes so the falloff tracks the frame's own aspect and the maths
   // needs no resolution uniform at all - one fewer thing to keep in sync on a resize.
-  const offset = screenUV.sub(uniforms.centre).mul(2);
+  const offset = screenUV
+    .sub(uniforms.centre)
+    .mul(2)
+    .mul(vec2(VIGNETTE_SHAPE.aspectX, VIGNETTE_SHAPE.aspectY));
   const distance = length(offset);
 
   const falloff = smoothstep(uniforms.radius, uniforms.radius.add(uniforms.softness), distance);

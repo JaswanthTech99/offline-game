@@ -43,10 +43,11 @@ import './styles/app.css';
 import { Color, PerspectiveCamera, Scene } from 'three/webgpu';
 
 import { probeCaps } from './core/Caps';
+import { collectDiagnostics, reportDiagnostics } from './core/Diagnostics';
 import { Engine } from './core/Engine';
 import type { EngineOptions } from './core/Engine';
 import type { Tier } from './core/Quality';
-import { TIERS, resolveTier, validateQualityTable } from './core/Quality';
+import { GLASS, TIERS, resolveTier, validateQualityTable } from './core/Quality';
 import type { Tickable } from './core/types';
 import { PhysicsWorld, initPhysics } from './physics/PhysicsWorld';
 import { PostChain } from './render/PostChain';
@@ -61,6 +62,8 @@ import { UNIVERSE_IDS } from './universe/UniverseTheme';
 import { getTheme } from './universe/registry';
 import { RING_LAYOUT } from './corridor/Rings';
 import { Playfield } from './gameplay/Playfield';
+import { reportSelfTest, runSelfTest } from './gameplay/SelfTest';
+import type { SelfTestRow } from './gameplay/SelfTest';
 import { asSeed } from './core/types';
 import type { Seed, Unit } from './core/types';
 
@@ -283,6 +286,19 @@ async function boot(shell: Shell): Promise<App> {
   const engine = await Engine.create(engineOptions);
 
   const quality = engine.quality;
+
+  // Printed before anything else can be blamed on the renderer. `tierOverride` is the
+  // authority on the source: resolveTier takes `override ?? detectTier(caps)`, so a
+  // non-null override means detectTier never ran.
+  reportDiagnostics(
+    collectDiagnostics(
+      engine.caps,
+      quality,
+      tierOverride === null ? 'detected' : 'override',
+      engine.renderScale,
+    ),
+  );
+
   root.dataset['preset'] = presetFor(quality.graphics);
   // The preset axis is image quality; this one is movement. core/Quality.ts keeps them
   // independent, and so must the DOM: a workstation whose owner asked for stillness keeps
@@ -315,6 +331,12 @@ async function boot(shell: Shell): Promise<App> {
 
   // The corridor is the level. It owns its own ring pool and the exposure histogram, so
   // all this has to do is hand it the theme and let the loop drive it.
+  if (params.get('selftest') === '1') {
+    const rows = runSelfTest(theme, quality.budget.corridorRings);
+    const ok = reportSelfTest(rows);
+    window.__spSelfTest = { rows, pass: ok };
+  }
+
   say(shell, 'Raising the corridor');
   // Snapshot state the HUD reads every frame. Mutated by the playfield's callbacks and
   // read in the frame handler below, so the HUD never does work inside a fixed step.
@@ -330,6 +352,11 @@ async function boot(shell: Shell): Promise<App> {
     theme,
     seed: seedFrom(params),
     ringBudget: quality.budget.corridorRings,
+    // ?glass=off is the A/B control for the optical pass; anything else takes the tier's row.
+    glass: params.get('glass') === 'off'
+      ? { fresnel: false, bevel: false, refraction: false, streak: false, microNoise: false }
+      : GLASS[quality.graphics],
+    caustics: params.get('glass') === 'off' ? false : GLASS[quality.graphics].caustics,
     events: {
       onBallsChanged: (balls) => {
         ballsNow = balls;
@@ -448,15 +475,30 @@ async function boot(shell: Shell): Promise<App> {
     playfield.throwAt(ndcX, ndcY);
   };
 
+  // A run that has ended must never be a dead end: the same tap that throws also retries.
+  const retryIfOver = (): boolean => {
+    if (!runOver) return false;
+    runOver = false;
+    playfield.restart();
+    return true;
+  };
+
   shell.canvas.addEventListener('pointerdown', (event: PointerEvent) => {
     event.preventDefault();
+    if (retryIfOver()) return;
     throwFromEvent(event.clientX, event.clientY);
   });
 
   // Keyboard throws at the reticle, which is where a gamepad or keyboard player is aiming.
   globalThis.addEventListener('keydown', (event: KeyboardEvent) => {
+    if (event.code === 'KeyR' || event.code === 'Enter') {
+      event.preventDefault();
+      retryIfOver();
+      return;
+    }
     if (event.code !== 'Space') return;
     event.preventDefault();
+    if (retryIfOver()) return;
     playfield.throwAt(0, 0);
   });
 
@@ -480,7 +522,7 @@ async function boot(shell: Shell): Promise<App> {
         ? { state: 'idle', label: 'run over', rangeM: 0 }
         : { state: 'tracking', label: 'glass', rangeM: playfield.travelMetres },
       danger: runOver
-        ? { level: 'critical', message: 'Out of balls' }
+        ? { level: 'critical', message: 'Out of balls - click, Space or R to retry' }
         : ballsNow <= LOW_BALL_WARNING
           ? { level: 'warn', message: 'Low on balls' }
           : { level: 'none', message: '' },
@@ -539,6 +581,8 @@ declare global {
     __shatterpoint__?: App;
     /** Set once the first frame has been presented. Read by the e2e harness only. */
     __spReady?: boolean;
+    /** Populated by ?selftest=1. Read by the e2e harness only. */
+    __spSelfTest?: { rows: readonly SelfTestRow[]; pass: boolean };
   }
 }
 

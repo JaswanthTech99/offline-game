@@ -221,11 +221,11 @@
  * structural removals further down.
  */
 :root {
-  --fx-vignette: 0.55;
+  --fx-vignette: 1;
   /* Unitless magnification delta, not a pixel offset -- see .fx__aberration. */
   --fx-ca: 0.006;
-  --fx-scan: 0.05;
-  --fx-grain: 0.055;
+  --fx-scan: 0.03;
+  --fx-grain: 0.03;
 }
 
 .fx {
@@ -247,12 +247,41 @@
  * stop sits at 42% so the centre third of the frame -- where the reticle and the next
  * pane always are -- is completely untouched.
  */
-.fx__vignette {
+/*
+ * FINAL EDGE CRUSH -- paints ABOVE every other fx layer, and that is the whole point.
+ *
+ * The stack order is vignette, aberration, scanlines, grain. Grain and scanlines are
+ * additive overlays, so they re-lift whatever the vignette just darkened: at 0.055 and
+ * 0.05 they put a ~7% floor under the entire frame, including the corners. A value
+ * structure that calls for sub-6% edges cannot be built under an additive layer, so the
+ * border is re-crushed last. A pseudo-element is used rather than a fifth div because it
+ * is guaranteed to paint after all children without touching the DOM contract.
+ */
+.fx::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
   background: radial-gradient(
-    farthest-side at 50% 50%,
-    transparent 42%,
-    rgb(3 5 9 / 0.55) 88%,
-    rgb(2 3 6 / 0.92) 130%
+    ellipse 66% 70% at 50% 47%,
+    transparent 0%,
+    transparent 58%,
+    rgb(0 0 0 / 0.55) 78%,
+    rgb(0 0 0 / 0.95) 92%,
+    rgb(0 0 0 / 1) 100%
+  );
+}
+
+.fx__vignette {
+  /* Ellipse, not farthest-side: on 16:9 a circular stop reaches the short edge first and
+     crushes top and bottom while the sides stay lit. Separate radii track the frame. */
+  background: radial-gradient(
+    ellipse 70% 74% at 50% 47%,
+    transparent 0%,
+    transparent 52%,
+    rgb(3 5 9 / 0.34) 72%,
+    rgb(1 2 4 / 0.90) 88%,
+    rgb(0 0 0 / 1) 97%
   );
   opacity: var(--fx-vignette);
 }
@@ -373,10 +402,10 @@
 }
 
 [data-preset='desktop-high'] {
-  --fx-vignette: 0.55;
+  --fx-vignette: 1;
   --fx-ca: 0.006;
-  --fx-scan: 0.05;
-  --fx-grain: 0.055;
+  --fx-scan: 0.03;
+  --fx-grain: 0.03;
   --glass-blur: 14px;
 }
 

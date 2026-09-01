@@ -47,7 +47,7 @@ export const ROOM_PLAN_LOOKAHEAD = 3;
 
 /* ---------------------------------------------------------------------------- ball economy */
 
-export const BALLS_AT_START = 2500000;
+export const BALLS_AT_START = 25;
 /**
  * A THROW COSTS ONE, WHATEVER THE VOLLEY SIZE.
  *
@@ -58,31 +58,46 @@ export const BALLS_AT_START = 2500000;
  * "25" means twenty-five taps, not twenty-five projectiles.
  */
 export const BALL_COST_PER_THROW = 1;
-export const BALLS_PER_CRYSTAL = 1;
+export const BALLS_PER_CRYSTAL = 3;
 /** Flying into glass. Large enough to be a disaster, small enough to survive twice from full. */
 export const BALL_PENALTY_ON_IMPACT = 10;
-export const BALLS_MAX = 999999999999999;
+export const BALLS_MAX = 99;
 /** A checkpoint tops the reserve UP to this floor; it never takes balls away from a good run. */
 export const CHECKPOINT_BALL_FLOOR = 25;
 export const CHECKPOINT_BALL_BONUS = 5;
 
 /* ----------------------------------------------------------------------------- multiplier */
 
+/**
+ * The ladder is DISCRETE and super-linear: x1 x2 x3 x5 x10. Even steps make the top rung
+ * feel like arithmetic; the jump to x10 is what makes a long clean streak worth protecting.
+ */
+export const MULTIPLIER_LADDER: readonly number[] = Object.freeze([1, 2, 3, 5, 10]);
 export const MULTIPLIER_MIN = 1;
-export const MULTIPLIER_MAX = 5;
-export const CRYSTALS_PER_MULTIPLIER_STEP = 10;
+export const MULTIPLIER_MAX = 10;
+/** Hits needed to climb one rung. */
+export const HITS_PER_MULTIPLIER_STEP = 4;
+export const CRYSTALS_PER_MULTIPLIER_STEP = HITS_PER_MULTIPLIER_STEP;
 
-/** Consecutive crystals -> volley size. The only place the streak/multiplier curve is defined. */
-export const multiplierForStreak = (streak: number): number =>
-  clampInt(MULTIPLIER_MIN + Math.floor(streak / CRYSTALS_PER_MULTIPLIER_STEP), MULTIPLIER_MIN, MULTIPLIER_MAX);
+/** Consecutive hits -> ladder rung. The only place the streak/multiplier curve is defined. */
+export const multiplierForStreak = (streak: number): number => {
+  const rung = clampInt(
+    Math.floor(Math.max(0, streak) / HITS_PER_MULTIPLIER_STEP),
+    0,
+    MULTIPLIER_LADDER.length - 1,
+  );
+  return MULTIPLIER_LADDER[rung] ?? MULTIPLIER_MIN;
+};
 
 /**
  * A missed crystal costs the PROGRESS toward the next tier but not the tier already earned.
  * Dropping the whole multiplier on one miss makes late rooms feel arbitrary; keeping the tier
  * and resetting the climb keeps the pressure without the whiplash. Only an impact demotes.
  */
-export const streakFloorForMultiplier = (multiplier: number): number =>
-  (clampInt(multiplier, MULTIPLIER_MIN, MULTIPLIER_MAX) - MULTIPLIER_MIN) * CRYSTALS_PER_MULTIPLIER_STEP;
+export const streakFloorForMultiplier = (multiplier: number): number => {
+  const rung = MULTIPLIER_LADDER.indexOf(multiplier);
+  return (rung < 0 ? 0 : rung) * HITS_PER_MULTIPLIER_STEP;
+};
 
 /* ------------------------------------------------------------------------- forward motion */
 

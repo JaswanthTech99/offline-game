@@ -258,8 +258,8 @@ const QUALITY_TABLE: Readonly<Record<Tier, QualityBudget>> = {
       motionBlurIntensity: 0.55,
       chromaticAberrationStrength: 0.35,
       filmIntensity: 0.16,
-      vignetteStrength: 0.34,
-      vignetteRadius: 0.78,
+      vignetteStrength: 0.95,
+      vignetteRadius: 0.42,
       lutIntensity: 1.0,
       sharpenStrength: 0.42,
       fsr1Sharpness: 0.5,
@@ -342,8 +342,8 @@ const QUALITY_TABLE: Readonly<Record<Tier, QualityBudget>> = {
       motionBlurIntensity: 0.45,
       chromaticAberrationStrength: 0.28,
       filmIntensity: 0.14,
-      vignetteStrength: 0.32,
-      vignetteRadius: 0.8,
+      vignetteStrength: 0.95,
+      vignetteRadius: 0.42,
       lutIntensity: 1.0,
       sharpenStrength: 0.0,
       fsr1Sharpness: 0.5,
@@ -426,8 +426,8 @@ const QUALITY_TABLE: Readonly<Record<Tier, QualityBudget>> = {
       motionBlurIntensity: 0,
       chromaticAberrationStrength: 0,
       filmIntensity: 0.12,
-      vignetteStrength: 0.3,
-      vignetteRadius: 0.82,
+      vignetteStrength: 0.95,
+      vignetteRadius: 0.42,
       lutIntensity: 1.0,
       sharpenStrength: 0.35,
       fsr1Sharpness: 0.55,
@@ -514,7 +514,7 @@ const QUALITY_TABLE: Readonly<Record<Tier, QualityBudget>> = {
       chromaticAberrationStrength: 0,
       filmIntensity: 0,
       vignetteStrength: 0.26,
-      vignetteRadius: 0.85,
+      vignetteRadius: 0.42,
       lutIntensity: 0.85,
       sharpenStrength: 0,
       fsr1Sharpness: 0.5,
@@ -607,6 +607,31 @@ const MOTION_TABLE: Readonly<Record<Tier, MotionRules>> = {
 };
 
 /** The tier whose MOTION rules apply when the player has asked for less movement. */
+/**
+ * Which optical properties of glass each tier pays for. Structurally compatible with
+ * GlassMaterial's GlassFeatures; declared here because the degradation table is the one
+ * place allowed to decide what a tier gets.
+ */
+export interface GlassToggles {
+  readonly fresnel: boolean;
+  readonly bevel: boolean;
+  readonly refraction: boolean;
+  readonly streak: boolean;
+  readonly microNoise: boolean;
+  /** Coloured pool cast on the floor under a lit pane. The most expensive of the six. */
+  readonly caustics: boolean;
+}
+
+export const GLASS: Readonly<Record<Tier, GlassToggles>> = Object.freeze({
+  ULTRA_4K:     { fresnel: true,  bevel: true,  refraction: true,  streak: true,  microNoise: true,  caustics: true },
+  // Drops caustics and refraction: both need an extra sample of something, and the frame
+  // budget at 1080p is already spent on the post chain.
+  DESKTOP_HIGH: { fresnel: true,  bevel: true,  refraction: false, streak: true,  microNoise: true,  caustics: false },
+  MOBILE_HIGH:  { fresnel: true,  bevel: true,  refraction: false, streak: true,  microNoise: false, caustics: false },
+  // Flat fills. A Fresnel term is still cheap enough to keep glass from reading as card.
+  MOBILE_LOW:   { fresnel: true,  bevel: false, refraction: false, streak: false, microNoise: false, caustics: false },
+});
+
 export const REDUCED_MOTION_TIER: Tier = 'MOBILE_LOW';
 
 function deepFreeze<T>(value: T): T {
