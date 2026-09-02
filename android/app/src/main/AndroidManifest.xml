@@ -18,6 +18,7 @@
         -->
         <activity
             android:screenOrientation="sensorLandscape"
+            android:windowLayoutInDisplayCutoutMode="shortEdges"
             android:hardwareAccelerated="true"
             android:resizeableActivity="false"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|density"

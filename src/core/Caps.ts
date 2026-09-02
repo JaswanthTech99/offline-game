@@ -129,6 +129,30 @@ export interface EngineCaps extends DeviceCaps {
   readonly gamepadConnected: boolean;
 }
 
+/**
+ * UNMASKED_RENDERER_WEBGL from a throwaway context.
+ *
+ * The debug extension is withheld by some browsers for fingerprinting reasons, so an empty
+ * answer means "not told" and never "no GPU" - callers must treat null as unknown rather
+ * than as low-end, or a privacy-hardened browser gets punished with MOBILE_LOW.
+ */
+function probeGlRenderer(): string | null {
+  try {
+    const canvas = globalThis.document.createElement('canvas');
+    const gl = canvas.getContext('webgl2') ?? canvas.getContext('webgl');
+    if (gl === null) return null;
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    const value =
+      dbg === null
+        ? gl.getParameter(gl.RENDERER)
+        : gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL);
+    gl.getExtension('WEBGL_lose_context')?.loseContext();
+    return typeof value === 'string' && value.length > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 function navigatorExtras(): Navigator & NavigatorExtras {
   return globalThis.navigator as Navigator & NavigatorExtras;
 }
@@ -209,6 +233,9 @@ export async function probeCaps(surface?: HTMLCanvasElement): Promise<EngineCaps
     maxAnisotropy: hasWebGPU
       ? WEBGPU_SPEC_MINIMUMS.maxSamplerAnisotropy
       : WEBGL2_SPEC_MINIMUMS.maxAnisotropy,
+    // Probed even when WebGPU exists: on Android it is the only way to tell a flagship
+    // GPU from a budget one, and detectTier reads it on every platform for consistency.
+    glRenderer: probeGlRenderer(),
     hardwareConcurrency: nav.hardwareConcurrency,
     deviceMemoryGb: typeof nav.deviceMemory === 'number' ? nav.deviceMemory : null,
     devicePixelRatio: globalThis.devicePixelRatio,
@@ -263,6 +290,7 @@ export function refineCaps(probed: EngineCaps, renderer: Renderer): EngineCaps {
     hasTimestampQuery: onWebGPU ? feature('timestamp-query') : false,
     hasFloat32Filterable: onWebGPU ? feature('float32-filterable') : probed.hasFloat32Filterable,
     maxAnisotropy: renderer.getMaxAnisotropy(),
+    glRenderer: probed.glRenderer,
     /**
      * The probe leaves this at the WebGL2 SPEC MINIMUM of 2048 on the non-WebGPU path,
      * because the probe runs before a renderer exists and has nothing better to ask. Left

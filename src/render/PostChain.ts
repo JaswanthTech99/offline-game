@@ -465,6 +465,26 @@ export class PostChain {
     this.pipeline.render();
   }
 
+  /**
+   * Times a short burst of real frames and returns the median in milliseconds.
+   *
+   * Run under the shader-compile veil, on the scene that is about to be played, so it
+   * measures the actual workload rather than a synthetic benchmark. The median, not the
+   * mean: one scheduling hiccup on a phone would drag a mean somewhere useless.
+   */
+  probeFrameMs(frames: number, warmup: number): number {
+    const samples: number[] = [];
+    for (let i = 0; i < frames + warmup; i += 1) {
+      const t0 = performance.now();
+      this.pipeline.render();
+      const dt = performance.now() - t0;
+      if (i >= warmup) samples.push(dt);
+    }
+    if (samples.length === 0) return 0;
+    samples.sort((a, b) => a - b);
+    return samples[Math.floor(samples.length / 2)] ?? 0;
+  }
+
   /** Called by the Engine's single rAF. Synchronous in r185 - never renderAsync(). */
   render(): void {
     this.pipeline.render();

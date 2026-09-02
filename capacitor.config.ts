@@ -17,8 +17,12 @@ const config: CapacitorConfig = {
     // The WebView must not decide the page is "too wide" and reflow it; the game sizes its
     // own canvas from the drawing buffer.
     allowMixedContent: false,
-    // Debug builds only. A release build would sign and drop this.
-    webContentsDebuggingEnabled: true,
+    /**
+     * NOT set here on purpose. Capacitor enables WebView debugging automatically when the
+     * application is debuggable, so leaving this unset gives debug builds CDP - which is
+     * exactly how the device gates attach Playwright to the live WebView - while a release
+     * build gets nothing. Hard-coding `true` shipped a remotely-inspectable WebView.
+     */
     // Hardware acceleration is the whole point - without it there is no WebGL2 context.
     backgroundColor: '#04040c',
   },

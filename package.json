@@ -25,7 +25,9 @@
     "mobile:apk": "npm run mobile:sync && cd android && ./gradlew assembleDebug",
     "icons:android": "node tools/icon-android.mjs",
     "apk:page": "node tools/apk-page.mjs",
-    "apk:serve": "node tools/apk-page.mjs && node tools/serve-apk.mjs"
+    "apk:serve": "node tools/apk-page.mjs && node tools/serve-apk.mjs",
+    "device:gate": "node tools/device/gate.mjs",
+    "mobile:release": "SP_MOBILE=1 vite build && cap sync android && node tools/icon-android.mjs && cd android && ./gradlew assembleRelease"
   },
   "dependencies": {
     "@capacitor/android": "^6.2.0",

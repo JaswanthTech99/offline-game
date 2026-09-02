@@ -31,12 +31,19 @@ import type { Frames, Millis } from './types';
  * host with no GPU cannot be premium and fluid at once, and pretending otherwise is how
  * this project shipped a 2x supersample to a machine that could not draw it.
  */
-export type Tier = 'SHOWCASE' | 'ULTRA_4K' | 'DESKTOP_HIGH' | 'MOBILE_HIGH' | 'MOBILE_LOW';
+export type Tier =
+  | 'SHOWCASE'
+  | 'ULTRA_4K'
+  | 'DESKTOP_HIGH'
+  | 'MOBILE_ULTRA'
+  | 'MOBILE_HIGH'
+  | 'MOBILE_LOW';
 
 export const TIERS: readonly Tier[] = Object.freeze([
   'SHOWCASE',
   'ULTRA_4K',
   'DESKTOP_HIGH',
+  'MOBILE_ULTRA',
   'MOBILE_HIGH',
   'MOBILE_LOW',
 ]);
@@ -500,6 +507,98 @@ const QUALITY_TABLE: Readonly<Record<Tier, QualityBudget>> = {
     },
   },
 
+  /**
+   * MOBILE_ULTRA. A flagship phone is not a big budget phone: an Adreno 750 has more pixel
+   * budget than the DESKTOP preset assumes, and its panel is denser than any laptop. This
+   * tier exists because the alternative was rendering a Snapdragon 8 Gen 3 at MOBILE_LOW.
+   * Render scale starts at native rather than below it - the point of the tier.
+   */
+  MOBILE_ULTRA: {
+    tier: 'MOBILE_ULTRA',
+    targetFps: 60,
+    renderScale: 1.0,
+    pixelBudget: 2560 * 1440,
+    renderScaleMin: 0.8,
+    renderScaleMax: 2.0,
+    maxShardsLive: 1400,
+    dustSprites: 28,
+    shardLifetimeMs: 3500,
+    moteBudget: 1800,
+    particleBudget: 3200,
+    prewarm: { shards: 1400, motes: 1800, particles: 3200, balls: 24, decals: 96 },
+    shadowCascades: 2,
+    shadowMapSize: 1024,
+    shadowDistance: 70,
+    maxDynamicLights: 4,
+    post: {
+      gtao: true,
+      ssr: false,
+      ssgi: false,
+      godrays: true,
+      bloom: true,
+      dof: true,
+      motionBlur: false,
+      traa: true,
+      taau: false,
+      // Spatial upsample plus sharpen: no history buffer to pay for, no ghosting on shards.
+      fsr1: true,
+      smaa: true,
+      fxaa: false,
+      chromaticAberration: true,
+      film: true,
+      vignette: true,
+      lut: true,
+      sharpen: true,
+    },
+    postIntensity: {
+      bloomStrength: 0.5,
+      bloomRadius: 0.6,
+      bloomThreshold: 0.88,
+      gtaoRadius: 0.4,
+      gtaoIntensity: 0.75,
+      gtaoScale: 0.5,
+      ssrMaxDistance: 0,
+      ssrThickness: 0.1,
+      ssrScale: 0.5,
+      ssgiIntensity: 0.0,
+      ssgiScale: 0.5,
+      godraysDensity: 0.8,
+      godraysWeight: 0.32,
+      godraysExposure: 0.26,
+      godraysSamples: 32,
+      dofFocusRange: 0,
+      dofBokehScale: 0,
+      motionBlurSamples: 0,
+      motionBlurIntensity: 0,
+      chromaticAberrationStrength: 0,
+      filmIntensity: 0.12,
+      vignetteStrength: 0.95,
+      vignetteRadius: 0.42,
+      lutIntensity: 1.0,
+      sharpenStrength: 0.35,
+      fsr1Sharpness: 0.55,
+      temporalFeedback: 0.0,
+    },
+    physicsSubstepCap: 3,
+    drawCallCeiling: 520,
+    textureAnisotropy: 4,
+    corridorRings: 12,
+    battleInstanceCaps: { horizon: 32, mid: 16, fore: 5 },
+    msBudget: {
+      frame: 16.6,
+      physics: 1.7,
+      shatter: 1.9,
+      culling: 0.5,
+      corridor: 1.9,
+      battle: 0.7,
+      render: 5.4,
+      post: 1.9,
+      audio: 0.3,
+      ui: 0.3,
+      spare: 2.0,
+    },
+  },
+
   MOBILE_HIGH: {
     tier: 'MOBILE_HIGH',
     targetFps: 60,
@@ -726,6 +825,21 @@ const MOTION_TABLE: Readonly<Record<Tier, MotionRules>> = {
     allowScreenFlash: true,
     allowChromaticPulse: true,
   },
+  MOBILE_ULTRA: {
+    cameraShakeScale: 0.85,
+    cameraRollScale: 0.8,
+    fovKickScale: 0.8,
+    parallaxScale: 0.9,
+    moteDriftScale: 0.9,
+    hudPulseScale: 0.9,
+    battleAnimationScale: 1.0,
+    slowMoFrameSkip: 2,
+    uiTransitionMs: 200,
+    allowMotionBlur: false,
+    allowScreenFlash: true,
+    allowChromaticPulse: false,
+  },
+
   MOBILE_HIGH: {
     cameraShakeScale: 0.85,
     cameraRollScale: 0.8,
@@ -780,6 +894,7 @@ export const GLASS: Readonly<Record<Tier, GlassToggles>> = Object.freeze({
   // Drops caustics and refraction: both need an extra sample of something, and the frame
   // budget at 1080p is already spent on the post chain.
   DESKTOP_HIGH: { fresnel: true,  bevel: true,  refraction: false, streak: true,  microNoise: true,  caustics: false },
+  MOBILE_ULTRA: { fresnel: true,  bevel: true,  refraction: false, streak: true,  microNoise: false, caustics: false },
   MOBILE_HIGH:  { fresnel: true,  bevel: true,  refraction: false, streak: true,  microNoise: false, caustics: false },
   // Flat fills. A Fresnel term is still cheap enough to keep glass from reading as card.
   MOBILE_LOW:   { fresnel: true,  bevel: false, refraction: false, streak: false, microNoise: false, caustics: false },
@@ -821,6 +936,17 @@ export function deriveRenderScale(
  * budget without a feedback loop is an aspiration, and on a weak host it is a stutter.
  */
 /** Boot never exceeds native; the governor earns anything above it. */
+/**
+ * Extra margin for a CURVED display edge, in CSS px.
+ *
+ * A curve is not a cutout: Android reports no inset for it, because nothing is occluding
+ * the pixels - they are simply bent away from the viewer. On a OnePlus 12 the left and
+ * right edges fall off sharply enough that a control sitting in the safe-area padding is
+ * still hard to see and hard to hit. This is added ON TOP of env(safe-area-inset-*), and
+ * is overridable per device via ?edge= while we have no way to detect curvature.
+ */
+export const CURVED_EDGE_MARGIN_PX = 10;
+
 export const SUPERSAMPLE_BOOT_CEILING = 1.0;
 
 /**
@@ -924,6 +1050,12 @@ export interface DeviceCaps {
   readonly surfacePixels: number;
   readonly isMobile: boolean;
   readonly prefersReducedMotion: boolean;
+  /**
+   * UNMASKED_RENDERER_WEBGL, or null where the browser withholds it for fingerprinting.
+   * On Android this is the ONLY signal that distinguishes an Adreno 750 from a budget part,
+   * because WebView exposes no navigator.gpu to ask.
+   */
+  readonly glRenderer: string | null;
 }
 
 const ULTRA_SURFACE_PIXELS = 3840 * 2160 * 0.5;
@@ -936,17 +1068,67 @@ const MOBILE_HIGH_MIN_TEXTURE = 8192;
  * Pure and total: same caps in, same tier out, on any machine. Nothing here reads a global,
  * which is what lets the tier be forced in tests and in the debug menu.
  */
-export function detectTier(caps: DeviceCaps): Tier {
-  // No WebGPU means the WebGL fallback backend, which cannot hold the high tiers' post chain.
-  if (!caps.hasWebGPU) return 'MOBILE_LOW';
+/**
+ * Flagship mobile GPUs, matched loosely against UNMASKED_RENDERER_WEBGL.
+ *
+ * This is a HINT, not the decision. An allowlist ages badly - it is wrong about every part
+ * released after it was written - so it only sets the ceiling a device may be promoted to,
+ * and `measuredTier` still has to earn it. Kept deliberately coarse: matching a family is
+ * durable, matching a model number is not.
+ */
+const FLAGSHIP_MOBILE_GPU =
+  // Qualcomm reports "Adreno (TM) 750", so the separator between the family name and
+  // the model number is not whitespace - it is a trademark marker. Matching \\s* here
+  // silently failed on every real Adreno string and sent flagships to MOBILE_HIGH.
+  /adreno[^0-9]{0,8}(7[3-9][0-9]|8[0-9][0-9])|mali-?g(7[1-9]|[89][0-9])|immortalis|apple\s*gpu|xclipse/i;
 
+export const MOBILE_ULTRA_MIN_CORES = 6;
+export const MOBILE_ULTRA_MIN_MEMORY_GB = 6;
+
+/**
+ * Frame-time thresholds for the boot probe, in milliseconds per frame. Measured under the
+ * shader-compile veil on a scene that is already built, so this is real work rather than a
+ * synthetic benchmark.
+ */
+export const PROBE = Object.freeze({
+  /** Frames to time. Enough to get past the first-frame outlier, short enough to not be felt. */
+  frames: 24,
+  /** Frames discarded at the start; the first present is always an outlier. */
+  warmupFrames: 6,
+  /** Median frame time at or under this earns the next tier up. */
+  promoteUnderMs: 11,
+  /** Median at or over this drops a tier immediately. */
+  demoteOverMs: 26,
+});
+
+/**
+ * The tier a device gets before anything has been measured.
+ *
+ * WEBGPU IS NOT THE SIGNAL ON ANDROID. Android WebView does not implement WebGPU at all, so
+ * gating on navigator.gpu put every phone - including a Snapdragon 8 Gen 3 with an Adreno
+ * 750 - on MOBILE_LOW, the same tier as a budget handset. That single condition was the
+ * whole of the "quality is low on mobile" complaint, and no amount of shader work would
+ * have touched it.
+ *
+ * What actually predicts capability on a phone is the GL renderer string, the core count
+ * and the reported memory. WebView exposes all three; it exposes navigator.gpu for none.
+ */
+export function detectTier(caps: DeviceCaps): Tier {
   if (caps.isMobile) {
+    const flagship = FLAGSHIP_MOBILE_GPU.test(caps.glRenderer ?? '');
+    const roomy =
+      caps.hardwareConcurrency >= MOBILE_ULTRA_MIN_CORES &&
+      (caps.deviceMemoryGb ?? 0) >= MOBILE_ULTRA_MIN_MEMORY_GB;
+    if (flagship && roomy) return 'MOBILE_ULTRA';
+
     const capable =
-      caps.hasCompute &&
       caps.hardwareConcurrency >= MOBILE_HIGH_MIN_CORES &&
       caps.maxTextureSize >= MOBILE_HIGH_MIN_TEXTURE;
     return capable ? 'MOBILE_HIGH' : 'MOBILE_LOW';
   }
+
+  // Desktop still benefits from WebGPU, where the whole post chain is affordable.
+  if (!caps.hasWebGPU) return 'MOBILE_HIGH';
 
   const bigScreen = caps.surfacePixels * caps.devicePixelRatio >= ULTRA_SURFACE_PIXELS;
   const bigMachine =
@@ -957,6 +1139,51 @@ export function detectTier(caps: DeviceCaps): Tier {
 
   return caps.hasCompute ? 'DESKTOP_HIGH' : 'MOBILE_HIGH';
 }
+
+/** Ordered worst to best. The probe steps along this, never jumps. */
+const PROMOTION_ORDER: readonly Tier[] = Object.freeze([
+  'MOBILE_LOW',
+  'MOBILE_HIGH',
+  'MOBILE_ULTRA',
+  'DESKTOP_HIGH',
+  'ULTRA_4K',
+]);
+
+export interface ProbeVerdict {
+  readonly tier: Tier;
+  readonly medianMs: number;
+  readonly reason: string;
+}
+
+/**
+ * Turns a measured median frame time into a tier, one step at a time.
+ *
+ * A measurement beats an allowlist because it is still right about hardware that does not
+ * exist yet. The ceiling argument exists so a probe run on a thermally cold phone cannot
+ * promote past what the device class can actually sustain.
+ */
+export function measuredTier(start: Tier, medianMs: number, ceiling: Tier): ProbeVerdict {
+  const at = PROMOTION_ORDER.indexOf(start);
+  const cap = PROMOTION_ORDER.indexOf(ceiling);
+  if (at < 0) return { tier: start, medianMs, reason: 'tier is not on the promotion ladder' };
+
+  if (medianMs >= PROBE.demoteOverMs && at > 0) {
+    return {
+      tier: PROMOTION_ORDER[at - 1] as Tier,
+      medianMs,
+      reason: `median ${medianMs.toFixed(1)}ms over the ${String(PROBE.demoteOverMs)}ms demote threshold`,
+    };
+  }
+  if (medianMs <= PROBE.promoteUnderMs && at < Math.min(cap, PROMOTION_ORDER.length - 1)) {
+    return {
+      tier: PROMOTION_ORDER[at + 1] as Tier,
+      medianMs,
+      reason: `median ${medianMs.toFixed(1)}ms under the ${String(PROBE.promoteUnderMs)}ms promote threshold`,
+    };
+  }
+  return { tier: start, medianMs, reason: `median ${medianMs.toFixed(1)}ms is inside the band` };
+}
+
 
 /**
  * The resolved pair of axes plus the two tables they select. Everything downstream reads

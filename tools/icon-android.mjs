@@ -59,7 +59,11 @@ for (const [density, factor] of DENSITIES) {
 
   writeFileSync(join(dir, 'ic_launcher.png'), await raster('icon.svg', legacy, false));
   writeFileSync(join(dir, 'ic_launcher_round.png'), await raster('icon.svg', legacy, false));
-  writeFileSync(join(dir, 'ic_launcher_foreground.png'), await raster('icon-maskable.svg', fg, true));
+  // From icon-foreground.svg, NOT icon-maskable.svg. The maskable variant paints its own
+  // full-bleed ground, so omitBackground could never make it transparent - that is why the
+  // shipped foreground had alpha 255 in every corner.
+  writeFileSync(join(dir, 'ic_launcher_foreground.png'), await raster('icon-foreground.svg', fg, true));
+  writeFileSync(join(dir, 'ic_launcher_monochrome.png'), await raster('icon-monochrome.svg', fg, true));
   written.push(`mipmap-${density}  legacy ${legacy}px  foreground ${fg}px`);
 }
 await browser.close();
@@ -70,7 +74,7 @@ const adaptive = `<?xml version="1.0" encoding="utf-8"?>
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
     <background android:drawable="@color/spGround"/>
     <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
-    <monochrome android:drawable="@mipmap/ic_launcher_foreground"/>
+    <monochrome android:drawable="@mipmap/ic_launcher_monochrome"/>
 </adaptive-icon>
 `;
 for (const name of ['mipmap-anydpi-v26']) {

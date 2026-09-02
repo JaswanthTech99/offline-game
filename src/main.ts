@@ -16,7 +16,12 @@
  *      tier                   should already be wearing the right preset, and a machine
  *                             with no WebGPU and no WebGL2 should be told so now rather
  *                             than after a renderer construction that cannot succeed.
- *   3. Physics              - Rapier is WASM and every constructor in it traps before the
+ *   3. (Physics was here) - Rapier is NOT on the boot path. Its world was constructed and
+ *      stepped but never handed to Playfield, which runs its own closed-form kinematics,
+ *      so the phone parsed 2.85 MB - 54% of the payload - for a simulation nothing read.
+ *      src/physics/ is retained for whenever it is genuinely wired; until then it must not
+ *      cost a millisecond of startup. The original note read:
+ *      Rapier is WASM and every constructor in it traps before the
  *                             module instantiates. It is started here and awaited later,
  *                             because it is network- and compile-bound while the renderer
  *                             is GPU-bound: run serially they add, run together they max.
@@ -48,9 +53,17 @@ import { installDebugBridge } from './core/DebugBridge';
 import { Engine } from './core/Engine';
 import type { EngineOptions } from './core/Engine';
 import type { Tier } from './core/Quality';
-import { GLASS, TIERS, WARMUP_BUDGET_MS, resolveTier, validateQualityTable } from './core/Quality';
+import {
+  CURVED_EDGE_MARGIN_PX,
+  GLASS,
+  TIERS,
+  PROBE,
+  WARMUP_BUDGET_MS,
+  measuredTier,
+  resolveTier,
+  validateQualityTable,
+} from './core/Quality';
 import type { Tickable } from './core/types';
-import { PhysicsWorld, initPhysics } from './physics/PhysicsWorld';
 import { PostChain } from './render/PostChain';
 import { enforceTouchTargets } from './ui/Focus';
 import { installMotion } from './ui/Motion';
@@ -233,7 +246,7 @@ class PostStage implements Tickable {
   }
 }
 
-/** Tick order. Lower runs first: physics produces transforms, the HUD reads them. */
+/** Tick order. Lower runs first. The physics slot is reserved, not occupied - see step 3. */
 /** Below this the HUD starts shouting. A design number, not a budget. */
 const LOW_BALL_WARNING = 5;
 
@@ -246,7 +259,6 @@ const ORDER = Object.freeze({
 
 interface App {
   readonly engine: Engine;
-  readonly physics: PhysicsWorld;
   readonly post: PostChain;
   readonly overlay: Overlay;
   readonly hud: Hud;
@@ -262,7 +274,12 @@ async function boot(shell: Shell): Promise<App> {
   if (import.meta.env.DEV) {
     const violations = validateQualityTable();
     if (violations.length > 0) {
-      throw new Error(`core/Quality.ts table is inconsistent:\n${violations.join('\n')}`);
+      // Loud, but never fatal. This is the THIRD place in this project where a dev-time
+      // consistency check aborted the app over a tuning mistake - Balance.ts and
+      // validateQualityTable's own module-scope check were the other two. A budget that
+      // does not add up is worth shouting about; it is not worth a boot failure the player
+      // sees as "could not start the graphics engine".
+      console.error(`core/Quality.ts table is inconsistent:\n${violations.join('\n')}`);
     }
   }
 
@@ -280,10 +297,6 @@ async function boot(shell: Shell): Promise<App> {
   const root = document.documentElement;
   root.dataset['preset'] = presetFor(resolveTier(probed, tierOverride).graphics);
 
-  // ---- 3. Physics ---------------------------------------------------------------------
-  // Started, not awaited. Rapier's WASM fetch and compile overlap the GPU device request
-  // below, which is the single largest saving available anywhere in the boot path.
-  const physicsReady = initPhysics();
 
   // ---- 4. Engine ----------------------------------------------------------------------
   say(shell, 'Starting the renderer');
@@ -306,10 +319,6 @@ async function boot(shell: Shell): Promise<App> {
   if (quality.reducedMotion) root.dataset['motion'] = 'reduced';
   else delete root.dataset['motion'];
 
-  say(shell, 'Warming physics');
-  await physicsReady;
-  const physics = new PhysicsWorld(quality.budget);
-  engine.subscribe(physics, ORDER.physics);
 
   // ---- 5/6. Scene, theme, post chain --------------------------------------------------
   const theme = getTheme(universeFrom(params));
@@ -492,6 +501,13 @@ async function boot(shell: Shell): Promise<App> {
   say(shell, 'Mounting the interface');
   installMotion(quality.motion);
 
+  // The curved-edge margin. Overridable per device with ?edge= until there is a way to
+  // detect curvature - there is no web API that reports it, and Android does not treat it
+  // as an inset because a curve occludes nothing.
+  const rawEdge = Number.parseFloat(params.get('edge') ?? '');
+  const edgePx = Number.isFinite(rawEdge) && rawEdge >= 0 ? rawEdge : CURVED_EDGE_MARGIN_PX;
+  root.style.setProperty('--sp-edge', `${String(edgePx)}px`);
+
   const overlay = new Overlay(shell.overlayHost, quality.motionRules);
   engine.subscribe(overlay, ORDER.ui);
 
@@ -624,6 +640,26 @@ async function boot(shell: Shell): Promise<App> {
     );
   }
 
+  /**
+   * MEASURE, then choose. detectTier's answer is a starting guess from what the device
+   * says about itself; this is what it can actually do with the scene that is loaded.
+   * An allowlist is wrong about every GPU released after it was written - a measurement
+   * is not.
+   */
+  if (tierOverride === null) {
+    const medianMs = post.probeFrameMs(PROBE.frames, PROBE.warmupFrames);
+    const verdict = measuredTier(quality.graphics, medianMs, ceilingFor(engine.caps));
+    if (verdict.tier !== quality.graphics) {
+      console.info(
+        `[shatterpoint] probe: ${quality.graphics} -> ${verdict.tier}  (${verdict.reason})`,
+      );
+      engine.setTierOverride(verdict.tier);
+    } else {
+      console.info(`[shatterpoint] probe: staying on ${quality.graphics}  (${verdict.reason})`);
+    }
+    window.__spProbe = { medianMs: verdict.medianMs, from: quality.graphics, to: verdict.tier, reason: verdict.reason };
+  }
+
   engine.subscribe(new PostStage(post), ORDER.render);
 
   // ---- 8. Start -----------------------------------------------------------------------
@@ -649,7 +685,7 @@ async function boot(shell: Shell): Promise<App> {
     ballWorld: () => playfield.newestBallPosition(),
   });
 
-  const app: App = { engine, physics, post, overlay, hud, scene, camera, playfield };
+  const app: App = { engine, post, overlay, hud, scene, camera, playfield };
 
   // Signalled after a frame has actually been presented, not at the end of boot. Boot
   // finishing only proves construction succeeded; this proves the renderer produced an
@@ -664,7 +700,6 @@ async function boot(shell: Shell): Promise<App> {
     overlay.dispose();
     playfield.dispose();
     post.dispose();
-    physics.dispose();
     engine.dispose();
   });
 
@@ -677,6 +712,8 @@ declare global {
     __shatterpoint__?: App;
     /** Set once the first frame has been presented. Read by the e2e harness only. */
     __spReady?: boolean;
+    /** Populated by the boot frame-time probe. Read by the device harness only. */
+    __spProbe?: { medianMs: number; from: string; to: string; reason: string };
     /** Populated by ?selftest=1. Read by the e2e harness only. */
     __spSelfTest?: { rows: readonly SelfTestRow[]; pass: boolean };
   }
@@ -696,6 +733,15 @@ async function raceWarmup(work: Promise<void>, budgetMs: number): Promise<number
   const result = await Promise.race([work.then(() => performance.now() - started), expiry]);
   globalThis.clearTimeout(timer);
   return result;
+}
+
+/**
+ * The highest tier a probe may promote a device to. A phone measured while thermally cold
+ * will happily post desktop frame times for twenty seconds and then throttle; the ceiling
+ * stops the probe writing a cheque the device cannot cash three minutes in.
+ */
+function ceilingFor(caps: { isMobile: boolean }): Tier {
+  return caps.isMobile ? 'MOBILE_ULTRA' : 'ULTRA_4K';
 }
 
 const shell = resolveShell();

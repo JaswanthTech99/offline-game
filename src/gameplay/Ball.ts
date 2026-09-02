@@ -105,6 +105,7 @@ const BALL_MESH_DETAIL: Readonly<Record<Tier, number>> = Object.freeze({
   SHOWCASE: 4,
   ULTRA_4K: 3,
   DESKTOP_HIGH: 3,
+  MOBILE_ULTRA: 3,
   MOBILE_HIGH: 2,
   MOBILE_LOW: 1,
 });

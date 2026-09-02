@@ -180,8 +180,11 @@ const OVERLAY_CSS = `
 
   /* Desktop pads are the base so the first paint - before ResizeObserver has reported and
      frame() has stamped data-size - is already laid out rather than flush to the bezel. */
-  --sp-pad-l: calc(64px + var(--sp-safe-l));
-  --sp-pad-r: calc(64px + var(--sp-safe-r));
+  /* --sp-edge is the curved-display margin, written by main.ts from Quality.ts. It is
+     separate from the safe-area inset on purpose: a curve occludes nothing, so Android
+     reports no inset for it, and only the left and right edges are affected. */
+  --sp-pad-l: calc(64px + var(--sp-safe-l) + var(--sp-edge, 0px));
+  --sp-pad-r: calc(64px + var(--sp-safe-r) + var(--sp-edge, 0px));
   --sp-pad-t: calc(64px + var(--sp-safe-t));
   --sp-pad-b: calc(64px + var(--sp-safe-b));
 
