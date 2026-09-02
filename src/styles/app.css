@@ -200,7 +200,10 @@
 
 /* ============================================================== THE FX STACK
  *
- * One inert container, four sibling layers, painted in DOM order.
+ * One inert container and four sibling layers. Their COMPOSITING order is declared by the
+ * z-index block below and is not the order they appear in index.html; the ordering law and
+ * the measurements behind it are documented there. What follows is about blending, which
+ * is a separate question from ordering and is the one the container settles.
  *
  * `.fx` HAS NO z-index AND NO `contain`, AND THAT IS LOAD-BEARING.
  * Two of these layers blend with what is behind them - the aberration screens light onto
@@ -212,10 +215,10 @@
  * the aberration would stop being additive at all. Both would still LOOK like they were
  * doing something, which is the worst failure mode available.
  *
- * With no stacking context here, the blending group is `#app` (which isolates), the
- * backdrop is the canvas, and paint order falls out of DOM order: canvas, fx, overlay.
- * `overflow: hidden` clips the grain layer's overscan without promoting anything --
- * overflow establishes a block formatting context, never a stacking context.
+ * With no stacking context here, the blending group is `#app` (which isolates) and the
+ * backdrop of every layer is the canvas plus whatever the layers under it have already
+ * put there. `overflow: hidden` clips the grain layer's overscan without promoting
+ * anything -- overflow establishes a block formatting context, never a stacking context.
  *
  * The four intensity knobs are the only things the presets touch, apart from the
  * structural removals further down.
@@ -242,48 +245,100 @@
 }
 
 /*
- * VIGNETTE. Hand-rolled here rather than in TSL because r185 ships no VignetteNode and a
- * radial darkening of the final image is exactly what a composited gradient is for. The
- * stop sits at 42% so the centre third of the frame -- where the reticle and the next
- * pane always are -- is completely untouched.
- */
-/*
- * FINAL EDGE CRUSH -- paints ABOVE every other fx layer, and that is the whole point.
+ * PAINT ORDER IS DECLARED HERE, NOT INHERITED FROM THE MARKUP.
  *
- * The stack order is vignette, aberration, scanlines, grain. Grain and scanlines are
- * additive overlays, so they re-lift whatever the vignette just darkened: at 0.055 and
- * 0.05 they put a ~7% floor under the entire frame, including the corners. A value
- * structure that calls for sub-6% edges cannot be built under an additive layer, so the
- * border is re-crushed last. A pseudo-element is used rather than a fifth div because it
- * is guaranteed to paint after all children without touching the DOM contract.
+ * THE LAW: a layer that can only ADD light paints BELOW the vignette. The vignette is the
+ * last layer permitted to move a pixel towards black, and after it only layers that
+ * mathematically cannot lift a black pixel are allowed to paint.
+ *
+ * That law is optical-stage order, which is why it is also the right look:
+ *
+ *   1  aberration   a LENS artefact -- it exists in the image the lens forms
+ *   2  vignette     the LENS's own falloff, which attenuates everything the lens formed,
+ *                   its own chromatic fringe included
+ *   3  scanlines    a DISPLAY artefact, downstream of the lens
+ *   4  grain        a SENSOR artefact, downstream of the lens
+ *
+ * Steps 3 and 4 are safe above the black point by construction, not by luck: the scanline
+ * gradient's only colour is black at normal blend, so it can subtract and nothing else,
+ * and `overlay` evaluates to 0 for a backdrop of 0 whatever the source is, so grain
+ * modulates midtones and cannot raise a crushed corner. Grain that is itself vignetted
+ * would be wrong anyway -- the emulsion is uniform, the image is what darkens.
+ *
+ * WHAT THIS REPLACED, AND THE NUMBERS THAT CONDEMNED IT.
+ * The stack used to paint vignette, aberration, scanlines, grain, with a `.fx::after`
+ * "final edge crush" bolted on top to claw the frame back. Measured on the composited page
+ * (e2e/gates/fx-layers.gate.spec.ts, DESKTOP_HIGH@1x, HUD hidden, frozen), removing one
+ * layer at a time from that stack gave:
+ *
+ *     removed              edge luma   corner luma
+ *     nothing (shipped)      2.77%        0.00%
+ *     .fx__vignette          3.14%        0.00%     <- the vignette was worth 0.37pp
+ *     .fx__aberration        1.56%        0.00%     <- it ADDED 1.21pp
+ *     .fx__scanlines         2.81%        0.00%     <- worth 0.04pp
+ *     .fx__grain             2.73%        0.00%     <- worth 0.05pp
+ *     .fx::after             9.71%        9.03%     <- the crush was doing all of it
+ *     the whole .fx stack    6.75%        8.06%
+ *
+ * Two things fall out. Grain and scanlines were never the problem -- together they move
+ * the edge by a tenth of a percentage point. The problem was the screen-blended
+ * aberration, whose gradient is strongest at exactly the corners the vignette is trying to
+ * reach zero at, painting above it. And without the crush the fx stack was a net
+ * BRIGHTENER: 9.71% edge against 6.75% for no fx at all.
+ *
+ * So the crush was not the right fix. It was a second, unauthored black point that the
+ * `--fx-vignette` knob does not scale, which is why every preset's vignette value was
+ * landing within 0.07 of every other one on the actual image -- the knob had stopped
+ * reaching the frame. ARCHITECTURE section 6 site 3 asks for ONE authored vignette
+ * strength; two of them, one of them untierable, is the violation and not the remedy.
+ * `.fx::after` is therefore gone and its falloff is folded into `.fx__vignette`, which now
+ * paints where the crush used to. One full-screen quad instead of two, and a preset knob
+ * that scales the whole black point again.
+ *
+ * WHY z-index HERE IS SAFE, given the warning at the top of this section.
+ * The warning is about `.fx` ITSELF: a stacking context on the container would sever the
+ * blend from the canvas. These are its CHILDREN, and all four already establish stacking
+ * contexts of their own (`mix-blend-mode` forces one on the aberration and the grain,
+ * `will-change: transform` on the grain and the scanlines). `.fx` stays z-index-free, so
+ * the blending group is still `#app` and the backdrop is still the canvas; the only thing
+ * these indices change is the order the four are composited into that group. They stay
+ * well under the 10 that `.sp-overlay` claims, so the HUD still paints over all of them,
+ * and `.fx`'s `overflow: hidden` still clips the grain's overscan because clipping follows
+ * the containing block, not the stacking order.
  */
-.fx::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
+.fx__aberration { z-index: 1; }
+.fx__vignette { z-index: 2; }
+.fx__scanlines { z-index: 3; }
+.fx__grain { z-index: 4; }
+
+/*
+ * VIGNETTE -- the frame's whole black point, in one layer.
+ *
+ * Hand-rolled here rather than in TSL because r185 ships no VignetteNode and a radial
+ * darkening of the final image is exactly what a composited gradient is for.
+ *
+ * Ellipse, not farthest-side: on 16:9 a circular stop reaches the short edge first and
+ * crushes top and bottom while the sides stay lit. The radii are deliberately under 2/3 --
+ * an ellipse sized to the frame leaves the mid-edges (top-centre, left-centre) sitting in
+ * the transparent zone, which is what held the edge band at 7% while the corners were
+ * already black. Nothing starts before 72%, so the centre third of the frame, where the
+ * reticle and the next pane always are, is untouched.
+ *
+ * The stops are the composite of the two gradients this replaces, evaluated at matching
+ * radii -- the old vignette and the old crush shared a centre and their aspect ratios
+ * differed by one part in three hundred, so their product is expressible as one curve.
+ * That is what makes this a reordering rather than a retune: at `--fx-vignette: 1` the
+ * falloff is the one that shipped, only now nothing paints additively on top of it.
+ */
+.fx__vignette {
   background: radial-gradient(
-    /* Radii deliberately under 2/3: an ellipse sized to the frame leaves the mid-edges
-       (top-centre, left-centre) inside the transparent zone, which is what held the edge
-       band at 7% while the corners were already black. */
     ellipse 58% 60% at 50% 47%,
     transparent 0%,
     transparent 72%,
-    rgb(0 0 0 / 0.52) 84%,
-    rgb(0 0 0 / 0.96) 92%,
-    rgb(0 0 0 / 1) 100%
-  );
-}
-
-.fx__vignette {
-  /* Ellipse, not farthest-side: on 16:9 a circular stop reaches the short edge first and
-     crushes top and bottom while the sides stay lit. Separate radii track the frame. */
-  background: radial-gradient(
-    ellipse 60% 62% at 50% 47%,
-    transparent 0%,
-    transparent 72%,
-    rgb(3 5 9 / 0.38) 84%,
-    rgb(1 2 4 / 0.92) 90%,
+    rgb(2 4 7 / 0.34) 78%,
+    rgb(1 2 4 / 0.66) 84%,
+    rgb(0 0 0 / 0.87) 88%,
+    rgb(0 0 0 / 0.99) 92%,
     rgb(0 0 0 / 1) 100%
   );
   opacity: var(--fx-vignette);
@@ -394,10 +449,23 @@
  * mapping lives in main.ts and nowhere else.
  */
 
+/*
+ * `--fx-vignette` IS NOW THE WHOLE BLACK POINT, so the four values below are not the four
+ * that were here before, and they are not a retune either.
+ *
+ * While `.fx::after` existed it applied a full-strength crush that no preset scaled, so
+ * the authored spread of 0.58 / 1 / 0.5 / 0.42 was landing on the image as an effective
+ * 0.81 / 0.87 / 0.80 / 0.79 -- four numbers pretending to be a ladder while the knob
+ * barely reached the frame. These values reproduce that measured effective strength per
+ * tier against the merged single-layer falloff, so folding the crush in changes no tier's
+ * shipped image. Re-authoring an actual spread across the ladder is an art-direction
+ * decision on top of a knob that now works; it is not this refactor's to make.
+ */
+
 /* ULTRA_4K -- the reference look. Nothing is removed, and the grain is finer because at
    this pixel density a coarser field reads as dirt on the screen rather than as film. */
 [data-preset='ultra-4k'] {
-  --fx-vignette: 0.58;
+  --fx-vignette: 0.94;
   --fx-ca: 0.0085;
   --fx-scan: 0.045;
   --fx-grain: 0.05;
@@ -418,7 +486,7 @@
  * cannot resolve, so it costs a full-screen blend to produce moire and nothing else.
  */
 [data-preset='mobile-high'] {
-  --fx-vignette: 0.5;
+  --fx-vignette: 0.93;
   --fx-ca: 0.004;
   --fx-grain: 0.04;
   --glass-blur: 8px;
@@ -444,7 +512,7 @@
  * injected sheets that load after this one.
  */
 [data-preset='mobile-low'] {
-  --fx-vignette: 0.42;
+  --fx-vignette: 0.92;
   --fx-ca: 0;
   --fx-scan: 0;
   --fx-grain: 0;

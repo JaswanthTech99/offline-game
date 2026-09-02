@@ -125,6 +125,7 @@ export class PostChain {
   readonly toggles: PostToggles;
 
   private readonly scenePass: PassNode;
+  private readonly rendererRef: Renderer;
   private readonly reports: PostStageReport[] = [];
   private readonly focusDistance: UniformNode<'float', number>;
   /** Non-null only when an upscaler is in the chain; it is what holds the low-res image. */
@@ -134,21 +135,15 @@ export class PostChain {
 
   constructor(options: PostChainOptions) {
     const { renderer, scene, camera, quality, caps, theme, keyLight } = options;
+    this.rendererRef = renderer;
     const budget = quality.budget;
     const intensity = budget.postIntensity;
 
     this.renderScale = budget.renderScale;
     this.toggles = resolvePostChain(budget, quality.reducedMotion, caps);
-    // TEMP-BISECT
-    {
-      const q = new URLSearchParams(globalThis.location.search).get('only');
-      if (q !== null) {
-        const want = new Set(q.split(',').filter((x) => x.length > 0));
-        const t: Record<string, boolean> = {};
-        for (const k of Object.keys(this.toggles)) t[k] = want.has(k);
-        (this as { toggles: PostToggles }).toggles = t as unknown as PostToggles;
-      }
-    }
+    // The ?only= debug bisect that used to live here has been DELETED. It shipped in
+    // production, and an empty ?only= set every toggle false - no AA, no vignette, no LUT.
+    // A debug hook that silently disables the renderer is not a debug hook.
 
     // SSR's GGX sampling loop does not compile on the WebGL backend - the fragment shader
     // fails VALIDATE_STATUS and the frame is lost. It is a WebGPU-era node, so on the
@@ -164,7 +159,9 @@ export class PostChain {
     // MSAA is never enabled: TRAA and TAAU both forbid it, and on the tiers without them
     // SMAA/FXAA cost a fraction of what multisampling a 4x-overdrawn glass corridor does.
     this.scenePass = pass(scene, camera);
-    this.scenePass.setResolutionScale(this.renderScale);
+    // Only the sub-1.0 part. Supersampling lives in the Engine's pixel ratio; applying the
+    // whole factor here too squared it.
+    this.scenePass.setResolutionScale(Math.min(1, this.renderScale));
 
     // The MRT is bandwidth, so it is only widened for attachments something downstream will
     // actually read. MOBILE_LOW ends up with a plain colour target and no G-buffer at all.
@@ -335,7 +332,7 @@ export class PostChain {
       // chain so far has to be pinned to the render scale or the upscale is a no-op that
       // still pays for the history buffer.
       const source = convertToTexture(node);
-      source.setResolutionScale(this.renderScale);
+      source.setResolutionScale(Math.min(1, this.renderScale));
       this.upscaleSource = source;
       const taauPass = taau(source, depthTexture, this.scenePass.getTextureNode('velocity'), camera);
       taauPass.currentFrameWeight = 1 - intensity.temporalFeedback;
@@ -349,7 +346,7 @@ export class PostChain {
       // The spatial stand-in for TAAU: no history buffer, so no ghosting on tumbling shards,
       // at the cost of reconstructing from one frame instead of eight.
       const source = convertToTexture(node);
-      source.setResolutionScale(this.renderScale);
+      source.setResolutionScale(Math.min(1, this.renderScale));
       this.upscaleSource = source;
       node = fsr1(source, intensity.fsr1Sharpness);
       this.note('fsr1', true, 'spatial upscale from the render scale');
@@ -450,6 +447,24 @@ export class PostChain {
     return this.reports;
   }
 
+  /**
+   * Compiles the whole node graph BEFORE the first presented frame.
+   *
+   * Nothing called compileAsync anywhere in this project, so the entire TSL post graph -
+   * seventeen stages of it - compiled lazily inside the first few frames the player sees.
+   * That is the first-seconds judder; it was never a dynamic-resolution governor, because
+   * until recently there was not one.
+   *
+   * Two throwaway renders follow the compile: the first render of a pipeline still
+   * allocates its bind groups and warms the upscaler's history buffer, and a temporal node
+   * with no history resolves visibly wrong on frame one.
+   */
+  async warmup(scene: Scene, camera: PerspectiveCamera): Promise<void> {
+    await this.rendererRef.compileAsync(scene, camera);
+    this.pipeline.render();
+    this.pipeline.render();
+  }
+
   /** Called by the Engine's single rAF. Synchronous in r185 - never renderAsync(). */
   render(): void {
     this.pipeline.render();
@@ -462,8 +477,9 @@ export class PostChain {
    */
   setRenderScale(scale: number): void {
     this.renderScale = scale;
-    this.scenePass.setResolutionScale(scale);
-    if (this.upscaleSource !== null) this.upscaleSource.setResolutionScale(scale);
+    const sub = Math.min(1, scale);
+    this.scenePass.setResolutionScale(sub);
+    if (this.upscaleSource !== null) this.upscaleSource.setResolutionScale(sub);
   }
 
   getRenderScale(): number {

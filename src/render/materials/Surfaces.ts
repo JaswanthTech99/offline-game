@@ -158,9 +158,9 @@ const SHAPE = Object.freeze({
    * Blinn: the highlight is the locus where the half-vector is PERPENDICULAR to the grain,
    * which is what makes it a streak across the brushing rather than a dot along it. */
   anisoWideExponent: 18,
-  anisoWideGain: 0.34,
+  anisoWideGain: 0.20,
   anisoTightExponent: 220,
-  anisoTightGain: 0.80,
+  anisoTightGain: 0.46,
   /** A brushed surface still has a diffuse floor; without it the metal is black off-lobe. */
   anisoWrap: 0.30,
 
@@ -168,23 +168,36 @@ const SHAPE = Object.freeze({
    * Held in DEVICE PIXELS via fwidth for the same reason the glass rim is: a world-space
    * wear line falls below one pixel around 40m and the far half of the corridor loses its
    * edges exactly where it most needs them. */
-  wearPixels: 1.9,
-  wearMinUv: 0.012,
-  wearGain: 0.62,
+  wearPixels: 1.3,
+  wearMinUv: 0.010,
+  /**
+   * SMALL. The first tuning of this term ran at 0.62 against a near-white sky.horizon and
+   * outlined every panel in the corridor in pure white - a wireframe, and worse, a bright
+   * architectural line competing with the reserved hue that marks a breakable pane. Wear is
+   * a hint that an edge has been touched, not a border.
+   */
+  wearGain: 0.17,
+  /** How far the wear tint travels from the surface's own colour toward the sky. */
+  wearSkyMix: 0.35,
   /** Wear is never uniform. Noise breaks the outline so it does not read as a wireframe. */
   wearNoiseScale: 6.5,
   wearNoiseDepth: 0.60,
   /** A worn edge is POLISHED, not scratched: it returns a tighter specular than the face. */
   wearRoughnessDrop: 0.26,
   /** Silhouette component, so curved and chamfered geometry wears too, not only box faces. */
-  grazePower: 3.4,
-  grazeGain: 0.45,
+  grazePower: 4.0,
+  grazeGain: 0.22,
 
   /* ---- detail -----------------------------------------------------------------------
    * Amplitude is deliberately below the level at which it reads as a texture. The job is to
    * stop a facet returning ONE value, not to add visible relief. */
-  detailScale: 2.7,
-  detailNormalAmount: 0.22,
+  detailScale: 2.2,
+  /**
+   * A TILT OF ABOUT TWO DEGREES. The first tuning ran at 0.22 - roughly twelve degrees - and
+   * the corridor came back looking hammered out of foil. The job of this term is that no
+   * facet returns exactly one value; the moment it is legible AS a texture it has overshot.
+   */
+  detailNormalAmount: 0.045,
   detailRoughnessAmount: 0.11,
   /** Finite-difference step for the gradient, in metres. Must exceed float error at 150m. */
   detailEpsilon: 0.05,
@@ -200,10 +213,19 @@ const SHAPE = Object.freeze({
   reflectBlurFloor: 0.05,
   /** Energy comes off the streak as it widens, or the far floor turns into a milky sheet. */
   reflectSpread: 0.55,
-  reflectStripGain: 0.62,
-  reflectEnvGain: 0.30,
+  reflectStripGain: 0.85,
+  /** Against a near-white horizon this is already a strong term; it does not want more. */
+  reflectEnvGain: 0.12,
   /** Schlick F0 for a dielectric. Kept physical: the grazing ramp is the whole effect. */
   reflectF0: 0.04,
+  /**
+   * A floor is polished stone, not water. Pure Schlick puts F at 0.04 everywhere the camera
+   * is not grazing, which hides the strip streak over the whole near floor - the half of it
+   * the player is actually looking at. This is the specular reflectance a smooth non-metal
+   * still returns head-on, and it is what makes the reflection a near-field cue as well as
+   * a distance one.
+   */
+  reflectBaseReflectance: 0.10,
   /** Below this the reflected ray is heading away from the ceiling and there is nothing. */
   reflectUpEpsilon: 0.03,
 
@@ -429,6 +451,9 @@ export function anisotropicMetal(options: AnisotropicMetalOptions): MeshStandard
 
   let emissive: Node<'vec3'> = vec3(0, 0, 0);
   const highlight = rgb(options.sky.horizon);
+  // Worn metal shows bare metal, not sky. Tinting the wear with the surface's own colour is
+  // what keeps the term reading as a material property instead of as an outline pass.
+  const wearTint = mix(rgb(options.colour), highlight, float(SHAPE.wearSkyMix));
 
   if (f.anisotropy) {
     // Grain, brought into view space and flattened onto the surface. Flattening matters:
@@ -467,7 +492,7 @@ export function anisotropicMetal(options: AnisotropicMetalOptions): MeshStandard
 
   if (f.edgeWear) {
     const wear = edgeWearTerm();
-    emissive = emissive.add(highlight.mul(wear).mul(float(SHAPE.wearGain)));
+    emissive = emissive.add(wearTint.mul(wear).mul(float(SHAPE.wearGain)));
     roughness = roughness.sub(wear.mul(float(SHAPE.wearRoughnessDrop)));
   }
 
@@ -485,6 +510,22 @@ export interface ReflectiveFloorOptions {
   readonly sky: SurfaceSky;
   readonly strips: StripGrid;
   readonly roughness: number;
+  /**
+   * THE ONE PLACE IN THIS FILE WHERE NON-ZERO METALNESS IS DEFENSIBLE, and it needs saying
+   * out loud because the rest of the module exists to avoid it.
+   *
+   * The prior finding is about a FULL metal: at metalness 1 the diffuse term is gone and the
+   * whole response is indirect specular, so with no environment the surface is a black hole.
+   * A partial metalness is a different animal - it keeps most of its diffuse and it raises
+   * F0 for DIRECT light, which the corridor has three of. Playfield's floor plates already
+   * ship at 0.30 and the broad specular pool the bounce light lays on them is the single
+   * brightest structure on the near floor; zeroing it to satisfy a rule about full metals
+   * threw that away and measured as a loss of 56 luminance levels in that region.
+   *
+   * Defaults to 0.30 to match what ships. Raise it only on a surface that has something to
+   * reflect, which - uniquely in this file - this one now does.
+   */
+  readonly metalness?: number | undefined;
   readonly features: SurfaceFeatures;
   readonly contact?: ContactOptions | undefined;
 }
@@ -511,7 +552,7 @@ export function reflectiveFloor(options: ReflectiveFloorOptions): MeshStandardNo
   const material = new MeshStandardNodeMaterial({
     color: new Color().copy(options.colour),
     roughness: options.roughness,
-    metalness: 0,
+    metalness: options.metalness ?? 0.3,
   });
 
   const detail = surfaceDetailNodes(f);
@@ -556,7 +597,9 @@ export function reflectiveFloor(options: ReflectiveFloorOptions): MeshStandardNo
     const facing = smoothstep(float(0), float(SHAPE.reflectUpEpsilon * 3), r.y);
 
     const grazing = pow(dot(n, viewLocal).clamp(0, 1).oneMinus(), float(5));
-    const fresnel = float(SHAPE.reflectF0).add(grazing.mul(float(1 - SHAPE.reflectF0)));
+    const fresnel = float(SHAPE.reflectF0)
+      .add(grazing.mul(float(1 - SHAPE.reflectF0)))
+      .max(float(SHAPE.reflectBaseReflectance));
 
     emissive = emissive
       .add(rgb(s.colour).mul(maskX).mul(maskZ).mul(spread).mul(facing).mul(float(SHAPE.reflectStripGain)))
@@ -567,7 +610,11 @@ export function reflectiveFloor(options: ReflectiveFloorOptions): MeshStandardNo
   if (f.edgeWear) {
     // Plate joints. The same pixel-width term, at half gain: a floor seam is a shallower
     // feature than a mullion edge and reads wrong at full strength.
-    emissive = emissive.add(rgb(options.sky.horizon).mul(edgeWearTerm()).mul(float(SHAPE.wearGain * 0.5)));
+    emissive = emissive.add(
+      mix(rgb(options.colour), rgb(options.sky.horizon), float(SHAPE.wearSkyMix))
+        .mul(edgeWearTerm())
+        .mul(float(SHAPE.wearGain * 0.5)),
+    );
   }
 
   material.emissiveNode = emissive;
@@ -614,7 +661,11 @@ export function wallSurface(options: WallSurfaceOptions): MeshStandardNodeMateri
     const wear = edgeWearTerm();
     // Stone chips rather than polishes, so it goes ROUGHER at the edge - the opposite sign
     // to metal. That difference is most of what separates the two materials at a glance.
-    emissive = emissive.add(rgb(options.sky.horizon).mul(wear).mul(float(SHAPE.wearGain * 0.35)));
+    emissive = emissive.add(
+      mix(rgb(options.colour), rgb(options.sky.horizon), float(SHAPE.wearSkyMix))
+        .mul(wear)
+        .mul(float(SHAPE.wearGain * 0.35)),
+    );
     roughness = roughness.add(wear.mul(float(SHAPE.wearRoughnessDrop * 0.5)));
   }
 

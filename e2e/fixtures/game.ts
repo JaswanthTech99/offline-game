@@ -22,6 +22,11 @@ export interface DebugSnapshot {
   displayWidth: number;
   displayHeight: number;
   liveAA: string[];
+  scenePassWidth: number;
+  scenePassHeight: number;
+  hardwareCeiling: number;
+  maxTextureSize: number;
+  pipelines: number;
   score: number;
   multiplier: number;
 }

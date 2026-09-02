@@ -128,6 +128,7 @@ export class Engine {
 
   private rafHandle: number | null = null;
   private renderScaleValue: number;
+  private lastClampReport = 0;
   private frameIndex = 0;
   private overBudgetFrames = 0;
   private underBudgetFrames = 0;
@@ -486,7 +487,29 @@ export class Engine {
     // tier ever wants a dpr cap of its own, that number belongs in Quality.ts.
     const maxTexture = this.capsValue.maxTextureSize;
     const hardwareCeiling = Math.min(maxTexture / cssWidth, maxTexture / cssHeight);
-    const pixelRatio = Math.min(globalThis.devicePixelRatio * this.renderScaleValue, hardwareCeiling);
+    /**
+     * SPLIT OWNERSHIP OF RENDER SCALE. The Engine applies only the SUPERSAMPLING part -
+     * anything at or above 1.0 - because that has to exist in the drawing buffer itself.
+     * PostChain applies only the sub-1.0 part, on the scene pass, where an upscaler can
+     * reconstruct it.
+     *
+     * Both used to apply the whole factor, so the scene rendered at renderScale SQUARED:
+     * at the 0.6 rung a 1920x1080 output was drawn at 691x389, thirteen percent of native.
+     * That single line is most of why this build looked soft.
+     */
+    const supersample = Math.max(1, this.renderScaleValue);
+    const requested = globalThis.devicePixelRatio * supersample;
+    const pixelRatio = Math.min(requested, hardwareCeiling);
+
+    // A clamp here silently discards a rung the ladder just granted. Say so, once per change.
+    if (requested > hardwareCeiling + 1e-3 && this.lastClampReport !== requested) {
+      this.lastClampReport = requested;
+      console.warn(
+        `[shatterpoint] render scale clamped by hardware: requested pixel ratio ` +
+          `${requested.toFixed(3)} exceeds ceiling ${hardwareCeiling.toFixed(3)} ` +
+          `(maxTextureSize ${maxTexture}). Supersampling above this is being discarded.`,
+      );
+    }
 
     const info: ResizeInfo = {
       cssWidth,

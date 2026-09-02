@@ -22,9 +22,19 @@
 import type { ParallaxTier } from '../battle/types';
 import type { Frames, Millis } from './types';
 
-export type Tier = 'ULTRA_4K' | 'DESKTOP_HIGH' | 'MOBILE_HIGH' | 'MOBILE_LOW';
+/**
+ * SHOWCASE sits ABOVE the budgeted tiers and is exempt from msBudget by design. It is for
+ * stills and for machines with a real GPU: maximum render scale, every stage that builds,
+ * full density, every detail layer. 10 fps there is acceptable.
+ *
+ * The four tiers below it are unchanged and remain smooth. No single setting is both - a
+ * host with no GPU cannot be premium and fluid at once, and pretending otherwise is how
+ * this project shipped a 2x supersample to a machine that could not draw it.
+ */
+export type Tier = 'SHOWCASE' | 'ULTRA_4K' | 'DESKTOP_HIGH' | 'MOBILE_HIGH' | 'MOBILE_LOW';
 
 export const TIERS: readonly Tier[] = Object.freeze([
+  'SHOWCASE',
   'ULTRA_4K',
   'DESKTOP_HIGH',
   'MOBILE_HIGH',
@@ -220,6 +230,100 @@ export interface MotionRules {
 }
 
 const QUALITY_TABLE: Readonly<Record<Tier, QualityBudget>> = {
+  /**
+   * SHOWCASE. Exempt from msBudget on purpose - targetFps 10 is a statement of intent, not
+   * a target to hit. Maximum render scale, every stage that builds, full density. It exists
+   * so a still, or a machine with a real GPU, is not held back by a budget written for a
+   * phone. The four tiers below it are untouched.
+   */
+  SHOWCASE: {
+    tier: 'SHOWCASE',
+    targetFps: 10,
+    // 4K native is a trap: it spends the entire frame on pixels nobody can resolve while
+    // starving the shatter sim. Render at 0.67 and let TAAU reconstruct, then sharpen.
+    renderScale: 2.0,
+    // ~4K worth of pixels. On a 1080p panel that lands at 2.0x supersampling.
+    pixelBudget: 7680 * 4320,
+    renderScaleMin: 1.0,
+    renderScaleMax: 2.0,
+    maxShardsLive: 4000,
+    dustSprites: 64,
+    shardLifetimeMs: 6000,
+    moteBudget: 6000,
+    particleBudget: 12000,
+    prewarm: { shards: 4000, motes: 6000, particles: 12000, balls: 32, decals: 256 },
+    shadowCascades: 4,
+    shadowMapSize: 2048,
+    shadowDistance: 120,
+    maxDynamicLights: 12,
+    post: {
+      gtao: true,
+      ssr: true,
+      ssgi: true,
+      godrays: true,
+      bloom: true,
+      dof: true,
+      motionBlur: true,
+      traa: true,
+      taau: true,
+      fsr1: false,
+      smaa: true,
+      fxaa: false,
+      chromaticAberration: true,
+      film: true,
+      vignette: true,
+      lut: true,
+      sharpen: true,
+    },
+    postIntensity: {
+      bloomStrength: 0.62,
+      bloomRadius: 0.72,
+      bloomThreshold: 0.82,
+      gtaoRadius: 0.55,
+      gtaoIntensity: 1.0,
+      gtaoScale: 1.0,
+      ssrMaxDistance: 40,
+      ssrThickness: 0.06,
+      ssrScale: 0.75,
+      ssgiIntensity: 0.85,
+      ssgiScale: 0.5,
+      godraysDensity: 0.92,
+      godraysWeight: 0.42,
+      godraysExposure: 0.34,
+      godraysSamples: 96,
+      dofFocusRange: 26,
+      dofBokehScale: 2.2,
+      motionBlurSamples: 16,
+      motionBlurIntensity: 0.55,
+      chromaticAberrationStrength: 0.35,
+      filmIntensity: 0.16,
+      vignetteStrength: 0.95,
+      vignetteRadius: 0.42,
+      lutIntensity: 1.0,
+      sharpenStrength: 0.42,
+      fsr1Sharpness: 0.5,
+      temporalFeedback: 0.92,
+    },
+    physicsSubstepCap: 8,
+    drawCallCeiling: 4000,
+    textureAnisotropy: 16,
+    corridorRings: 20,
+    battleInstanceCaps: { horizon: 96, mid: 48, fore: 12 },
+    msBudget: {
+      frame: 100.0,
+      physics: 11.4,
+      shatter: 12.6,
+      culling: 4.2,
+      corridor: 10.8,
+      battle: 5.4,
+      render: 26.4,
+      post: 13.2,
+      audio: 1.8,
+      ui: 1.8,
+      spare: 2.0,
+    },
+  },
+
   ULTRA_4K: {
     tier: 'ULTRA_4K',
     targetFps: 60,
@@ -343,7 +447,9 @@ const QUALITY_TABLE: Readonly<Record<Tier, QualityBudget>> = {
       film: true,
       vignette: true,
       lut: true,
-      sharpen: false,
+      // TRAA resolves soft by construction; without this the top budgeted tier looks
+      // blurrier than the one below it.
+      sharpen: true,
     },
     postIntensity: {
       bloomStrength: 0.58,
@@ -370,7 +476,7 @@ const QUALITY_TABLE: Readonly<Record<Tier, QualityBudget>> = {
       vignetteStrength: 0.95,
       vignetteRadius: 0.42,
       lutIntensity: 1.0,
-      sharpenStrength: 0.0,
+      sharpenStrength: 0.25,
       fsr1Sharpness: 0.5,
       temporalFeedback: 0.9,
     },
@@ -509,7 +615,9 @@ const QUALITY_TABLE: Readonly<Record<Tier, QualityBudget>> = {
       motionBlur: false,
       traa: false,
       taau: false,
-      fsr1: false,
+      // A 0.6 buffer with no upscaler is bilinearly stretched by the compositor. FSR1 plus
+      // a sharpen pass is the cheapest reconstruction that does not look like a blur.
+      fsr1: true,
       smaa: true,
       fxaa: false,
       chromaticAberration: false,
@@ -518,7 +626,7 @@ const QUALITY_TABLE: Readonly<Record<Tier, QualityBudget>> = {
       // what makes the frame look authored rather than default.
       vignette: true,
       lut: true,
-      sharpen: false,
+      sharpen: true,
     },
     postIntensity: {
       bloomStrength: 0.42,
@@ -545,8 +653,8 @@ const QUALITY_TABLE: Readonly<Record<Tier, QualityBudget>> = {
       vignetteStrength: 0.26,
       vignetteRadius: 0.42,
       lutIntensity: 0.85,
-      sharpenStrength: 0,
-      fsr1Sharpness: 0.5,
+      sharpenStrength: 0.30,
+      fsr1Sharpness: 0.55,
       temporalFeedback: 0,
     },
     physicsSubstepCap: 3,
@@ -575,6 +683,21 @@ const QUALITY_TABLE: Readonly<Record<Tier, QualityBudget>> = {
  * it borrows MOBILE_LOW's row. That is the whole trick - one table, two independent lookups.
  */
 const MOTION_TABLE: Readonly<Record<Tier, MotionRules>> = {
+  SHOWCASE: {
+    cameraShakeScale: 1.0,
+    cameraRollScale: 1.0,
+    fovKickScale: 1.0,
+    parallaxScale: 1.0,
+    moteDriftScale: 1.0,
+    hudPulseScale: 1.0,
+    battleAnimationScale: 1.0,
+    slowMoFrameSkip: 2,
+    uiTransitionMs: 220,
+    allowMotionBlur: true,
+    allowScreenFlash: true,
+    allowChromaticPulse: true,
+  },
+
   ULTRA_4K: {
     cameraShakeScale: 1.0,
     cameraRollScale: 1.0,
@@ -652,6 +775,7 @@ export interface GlassToggles {
 }
 
 export const GLASS: Readonly<Record<Tier, GlassToggles>> = Object.freeze({
+  SHOWCASE:     { fresnel: true,  bevel: true,  refraction: true,  streak: true,  microNoise: true,  caustics: true },
   ULTRA_4K:     { fresnel: true,  bevel: true,  refraction: true,  streak: true,  microNoise: true,  caustics: true },
   // Drops caustics and refraction: both need an extra sample of something, and the frame
   // budget at 1080p is already spent on the post chain.
@@ -698,6 +822,14 @@ export function deriveRenderScale(
  */
 /** Boot never exceeds native; the governor earns anything above it. */
 export const SUPERSAMPLE_BOOT_CEILING = 1.0;
+
+/**
+ * How long boot will wait for the shader graph to precompile before giving up and starting
+ * anyway. Awaiting compileAsync unbounded is a boot hazard: on a software rasteriser the
+ * seventeen-stage TSL graph takes minutes, and a game that never reaches its first frame is
+ * strictly worse than one that judders for a second. On real hardware this is never hit.
+ */
+export const WARMUP_BUDGET_MS = 8000;
 
 export const DYNAMIC_RESOLUTION = Object.freeze({
   /** Frames over budget before dropping a rung. Short: a drop must feel immediate. */
@@ -850,6 +982,7 @@ export function resolvePostChain(
   budget: QualityBudget,
   reducedMotion: boolean,
   caps: Pick<DeviceCaps, 'hasCompute'>,
+  renderScale: number = budget.renderScale,
 ): PostToggles {
   const gated: Record<PostEffect, boolean> = { ...budget.post };
 
@@ -867,6 +1000,17 @@ export function resolvePostChain(
   }
   // Likewise, dropping every AA path would ship aliased glass edges. FXAA is always payable.
   if (!gated.traa && !gated.taau && !gated.smaa) gated.fxaa = true;
+
+  /**
+   * A sub-native buffer MUST be reconstructed by something. Without this, MOBILE_LOW
+   * rendered at 0.6 and was bilinearly stretched to the display by the compositor - the
+   * single largest cause of the build looking soft. An upscaler is not a luxury on a tier
+   * that renders small; it is the reason rendering small is survivable at all.
+   */
+  if (renderScale < 1 && !gated.taau && !gated.fsr1) {
+    gated.fsr1 = true;
+    gated.sharpen = true;
+  }
 
   return gated;
 }
@@ -952,6 +1096,9 @@ const IS_DEV: boolean = typeof import.meta.env === 'object' && import.meta.env.D
 if (IS_DEV) {
   const violations = validateQualityTable();
   if (violations.length > 0) {
-    throw new Error(`core/Quality.ts is internally inconsistent:\n  ${violations.join('\n  ')}`);
+    // LOUD, but never a throw. This runs at module scope, so throwing kills the import of
+    // main.ts itself and the player stares at a boot veil forever. Balance.ts made exactly
+    // this mistake and it cost a debugging session; a tuning error must shout, not brick.
+    console.error(`core/Quality.ts is internally inconsistent:\n  ${violations.join('\n  ')}`);
   }
 }

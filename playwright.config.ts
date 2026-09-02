@@ -10,7 +10,7 @@ import { defineConfig, devices } from '@playwright/test';
  * a gate than a fast one. Only the frame-rate numbers are meaningless here; luma, draw
  * calls, geometry and phase ordering are all exact.
  */
-const TIERS = ['ULTRA_4K', 'DESKTOP_HIGH', 'MOBILE_HIGH', 'MOBILE_LOW'] as const;
+const TIERS = ['SHOWCASE', 'ULTRA_4K', 'DESKTOP_HIGH', 'MOBILE_HIGH', 'MOBILE_LOW'] as const;
 const SCALES = [1, 2, 4] as const;
 
 /** Device pixels every project targets, whatever its deviceScaleFactor. */

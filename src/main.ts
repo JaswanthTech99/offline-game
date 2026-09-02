@@ -48,7 +48,7 @@ import { installDebugBridge } from './core/DebugBridge';
 import { Engine } from './core/Engine';
 import type { EngineOptions } from './core/Engine';
 import type { Tier } from './core/Quality';
-import { GLASS, TIERS, resolveTier, validateQualityTable } from './core/Quality';
+import { GLASS, TIERS, WARMUP_BUDGET_MS, resolveTier, validateQualityTable } from './core/Quality';
 import type { Tickable } from './core/types';
 import { PhysicsWorld, initPhysics } from './physics/PhysicsWorld';
 import { PostChain } from './render/PostChain';
@@ -592,6 +592,19 @@ async function boot(shell: Shell): Promise<App> {
     { keys: 'Space', action: 'throw at reticle' },
   ]);
 
+  // Compile the whole node graph BEFORE the first presented frame. Without this the
+  // seventeen-stage TSL chain compiles lazily inside the frames the player is watching,
+  // which is the judder in the opening seconds - it was never a resolution governor.
+  say(shell, 'Compiling shaders');
+  const warmedInMs = await raceWarmup(post.warmup(scene, camera), WARMUP_BUDGET_MS);
+  if (warmedInMs === null) {
+    console.warn(
+      `[shatterpoint] shader precompile exceeded ${String(WARMUP_BUDGET_MS)}ms and was not ` +
+        'awaited to completion. Expect judder in the opening seconds. This host is almost ' +
+        'certainly rasterising on the CPU - check the boot diagnostics above.',
+    );
+  }
+
   engine.subscribe(new PostStage(post), ORDER.render);
 
   // ---- 8. Start -----------------------------------------------------------------------
@@ -612,6 +625,7 @@ async function boot(shell: Shell): Promise<App> {
     quality,
     tierSource: tierOverride === null ? 'detected' : 'override',
     canvas: shell.canvas,
+    caps: engine.caps,
     builtStages: () => post.stages.filter((st) => st.built).map((st) => st.effect),
     ballWorld: () => playfield.newestBallPosition(),
   });
@@ -647,6 +661,22 @@ declare global {
     /** Populated by ?selftest=1. Read by the e2e harness only. */
     __spSelfTest?: { rows: readonly SelfTestRow[]; pass: boolean };
   }
+}
+
+/**
+ * Awaits the warmup, but never past `budgetMs`. Returns the elapsed time, or null if the
+ * budget ran out first - in which case the compile continues in the background and the
+ * first frames simply pay for whatever is left.
+ */
+async function raceWarmup(work: Promise<void>, budgetMs: number): Promise<number | null> {
+  const started = performance.now();
+  let timer = 0;
+  const expiry = new Promise<null>((resolve) => {
+    timer = globalThis.setTimeout(() => resolve(null), budgetMs);
+  });
+  const result = await Promise.race([work.then(() => performance.now() - started), expiry]);
+  globalThis.clearTimeout(timer);
+  return result;
 }
 
 const shell = resolveShell();

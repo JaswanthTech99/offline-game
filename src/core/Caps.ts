@@ -263,7 +263,32 @@ export function refineCaps(probed: EngineCaps, renderer: Renderer): EngineCaps {
     hasTimestampQuery: onWebGPU ? feature('timestamp-query') : false,
     hasFloat32Filterable: onWebGPU ? feature('float32-filterable') : probed.hasFloat32Filterable,
     maxAnisotropy: renderer.getMaxAnisotropy(),
+    /**
+     * The probe leaves this at the WebGL2 SPEC MINIMUM of 2048 on the non-WebGPU path,
+     * because the probe runs before a renderer exists and has nothing better to ask. Left
+     * unrefined it silently capped supersampling: Engine derives its hardware ceiling from
+     * maxTextureSize / css size, and 2048/1920 = 1.067, so every rung above that was thrown
+     * away without a word. Real WebGL2 hardware reports 8192-16384.
+     */
+    maxTextureSize: realMaxTextureSize(renderer, probed.maxTextureSize),
   };
+}
+
+/** Asks the live backend rather than trusting a spec floor. Falls back to the probe. */
+function realMaxTextureSize(renderer: Renderer, fallback: number): number {
+  const backend = renderer.backend as {
+    gl?: { getParameter(p: number): unknown; MAX_TEXTURE_SIZE?: number };
+    device?: { limits?: { maxTextureDimension2D?: number } };
+  };
+  const gpuLimit = backend.device?.limits?.maxTextureDimension2D;
+  if (typeof gpuLimit === 'number' && gpuLimit > 0) return gpuLimit;
+
+  const gl = backend.gl;
+  if (gl !== undefined && typeof gl.MAX_TEXTURE_SIZE === 'number') {
+    const v = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    if (typeof v === 'number' && v > 0) return v;
+  }
+  return fallback;
 }
 
 /** Re-reads only the fields that can change while the tab is open. */

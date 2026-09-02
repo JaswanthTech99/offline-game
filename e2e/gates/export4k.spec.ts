@@ -135,6 +135,10 @@ test.describe('@export4k-selfcheck', () => {
 });
 
 test.describe('@export4k', () => {
+  // Applies to the hooks as well as the body, which `test.setTimeout` inside the test does
+  // not: a 4K software frame is minutes and the settle poll has to be allowed to wait.
+  test.describe.configure({ timeout: TEST_TIMEOUT_MS });
+
   test.beforeEach(({}, info) => {
     test.skip(
       !exportRequested(),
@@ -144,8 +148,18 @@ test.describe('@export4k', () => {
   });
 
   test('exports a genuine 3840x2160 still', async ({ game }, info) => {
-    test.setTimeout(TEST_TIMEOUT_MS);
     const page = game.page;
+
+    // The dev server has hot reload on, and this repo is being edited by other people while
+    // the export renders. A Vite full reload lands as "Execution context was destroyed" and
+    // throws away however many minutes of 4K rasterisation had accumulated - it destroyed
+    // the first run of this spec. Mocking the HMR socket without connecting it upstream
+    // leaves the client with an open socket that simply never receives an update, which is
+    // the quietest way to make the page immune: no reload, and no reconnect error spam for
+    // the fixture's console-error assertion to trip over.
+    await page.routeWebSocket(/./, () => {
+      // Deliberately empty: not calling connectToServer() is what severs HMR.
+    });
 
     // The viewport is DERIVED from the target rather than written down, so a change to
     // either the target or the project's deviceScaleFactor cannot silently produce a still

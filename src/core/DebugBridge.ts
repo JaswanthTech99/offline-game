@@ -42,6 +42,13 @@ export interface DebugSnapshot {
   readonly displayWidth: number;
   readonly displayHeight: number;
   readonly liveAA: readonly string[];
+  /** Scene-pass buffer, i.e. what the 3D is actually drawn at before upscale. */
+  readonly scenePassWidth: number;
+  readonly scenePassHeight: number;
+  readonly hardwareCeiling: number;
+  readonly maxTextureSize: number;
+  /** three's compiled-pipeline count. Must not grow after the first presented frame. */
+  readonly pipelines: number;
   readonly score: number;
   readonly multiplier: number;
 }
@@ -102,6 +109,7 @@ export interface BridgeDeps {
   readonly quality: QualityResolution;
   readonly tierSource: 'detected' | 'override';
   readonly canvas: HTMLCanvasElement;
+  readonly caps: { readonly maxTextureSize: number };
   /** Live post stages, so the bridge can report which AA actually built. */
   readonly builtStages: () => readonly PostEffect[];
   readonly ballWorld: () => { x: number; y: number; z: number } | null;
@@ -149,6 +157,13 @@ export function installDebugBridge(deps: BridgeDeps): DebugBridge {
         displayWidth: deps.canvas.clientWidth,
         displayHeight: deps.canvas.clientHeight,
         liveAA: deps.builtStages().filter((e) => AA_EFFECTS.includes(e)),
+        scenePassWidth: Math.round(size.x * Math.min(1, deps.engine.renderScale)),
+        scenePassHeight: Math.round(size.y * Math.min(1, deps.engine.renderScale)),
+        hardwareCeiling: deps.caps.maxTextureSize / Math.max(1, deps.canvas.clientWidth),
+        maxTextureSize: deps.caps.maxTextureSize,
+        pipelines:
+          (deps.renderer.info as unknown as { render?: { pipelines?: number } }).render
+            ?.pipelines ?? 0,
         score: deps.field.scoreValue,
         multiplier: deps.field.multiplierValue,
       };
