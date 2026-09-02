@@ -82,6 +82,7 @@ export interface DebugField {
   restart(): void;
   setViewportPx(px: number): void;
   testPlaceOnly(kind: DebugPlaceKind, distanceM: number, offsetX?: number): void;
+  testPlaceAlso(kind: DebugPlaceKind, distanceM: number, offsetX?: number): void;
   testShatter(): void;
   testStep(dtMs: number): void;
   testAdvanceTo(approach: number): void;
@@ -100,6 +101,8 @@ export interface DebugBridge {
   /** One deterministic fixed step. The only way to advance while frozen. */
   step(dtMs: number): void;
   place(kind: DebugPlaceKind, distanceM: number, offsetX?: number): void;
+  /** Adds a subject without clearing the ones already placed. */
+  placeAlso(kind: DebugPlaceKind, distanceM: number, offsetX?: number): void;
   clearField(): void;
   advanceTo(approach: number): void;
   throwAt(ndcX: number, ndcY: number): void;
@@ -198,6 +201,7 @@ export function installDebugBridge(deps: BridgeDeps): DebugBridge {
     },
 
     place: (kind, distanceM, offsetX = 0) => deps.field.testPlaceOnly(kind, distanceM, offsetX),
+    placeAlso: (kind, distanceM, offsetX = 0) => deps.field.testPlaceAlso(kind, distanceM, offsetX),
     clearField: () => deps.field.testClearField(),
     advanceTo: (approach: number) => deps.field.testAdvanceTo(approach),
     throwAt: (x: number, y: number) => deps.field.throwAt(x, y),

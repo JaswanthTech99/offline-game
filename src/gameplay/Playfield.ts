@@ -1279,6 +1279,25 @@ export class Playfield implements Tickable, Disposable {
     // The caller can push the subject off the corridor axis: measuring dead centre puts the
     // aperture glow directly behind the pane, and a max-luma read then measures the aperture
     // rather than the pane - which is what reported invisible scenery at 100% luma.
+    this.spawnSubject(kind, distanceM, offsetX);
+  }
+
+  /**
+   * Place a second subject WITHOUT clearing the first. `testPlaceOnly` wipes the field on
+   * every call, so a two-subject comparison was impossible through that seam - and running
+   * the two subjects as two separate captures compares two different lighting situations,
+   * because bloom, fog and the vignette all depend on what else is in the frame.
+   */
+  testPlaceAlso(kind: 'pane' | 'decorative' | 'crystal', distanceM: number, offsetX = 0): void {
+    this.frozen = true;
+    this.spawnSubject(kind, distanceM, offsetX);
+  }
+
+  private spawnSubject(
+    kind: 'pane' | 'decorative' | 'crystal',
+    distanceM: number,
+    offsetX: number,
+  ): void {
     if (kind === 'pane') this.spawnPane(offsetX, 0, -distanceM, 1);
     else if (kind === 'crystal') this.spawnCrystal(offsetX, 0, -distanceM);
     else this.spawnDecorative(offsetX, 0, -distanceM);

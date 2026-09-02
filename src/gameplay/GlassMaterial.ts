@@ -82,12 +82,19 @@ const LEGIBILITY = Object.freeze({
   /** Never let the rim fall below this fraction of a pane, however far away it is. */
   rimMinUv: 0.02,
   /** How far above local background the rim sits. Additive, so it survives any backdrop. */
-  rimGain: 1.15,
+  rimGain: 1.25,
   /** Inner contact darkening, so a pane still separates when it overlaps a bright strip. */
   shadeWidthPixels: 5.0,
   shadeDepth: 0.55,
-  /** Face-on floor opacity. Physically too high for glass; legibly necessary. */
-  faceFloor: 0.16,
+  /**
+   * Face-on floor opacity. Physically too high for glass; legibly necessary, and 0.16 was
+   * not enough of it. Measured against the corridor at 10m the interior sat 0.0011 above
+   * its own background - the middle of the pane was, to within a thousandth, the wall
+   * behind it. That is what a "hollow cyan rectangle" IS: not a rim that is too bright, but
+   * a face that is not there. The rim/interior ratio never caught it because the interior
+   * reads bright when the BACKGROUND is bright; interior-minus-background is the number.
+   */
+  faceFloor: 0.24,
   decorativeDim: 0.12,
   /**
    * Decorative glass is deliberately MORE opaque than breakable. Counter-intuitive until
@@ -95,6 +102,36 @@ const LEGIBILITY = Object.freeze({
    * reads as brighter than the target in front of it. Opaque neutral grey reads as wall.
    */
   decorativeOpacity: 0.72,
+  /**
+   * CORNER BRACKETS, not a continuous outline. A closed rectangle of uniform stroke is the
+   * universal visual language for "selected object", and the eye reads it as an annotation
+   * laid over the scene rather than as an edge belonging to a surface. Four L-shaped arms
+   * say "framed pane" instead. Fraction of the half-extent each arm runs from its corner.
+   */
+  bracketArm: 0.22,
+  /**
+   * The continuous edge is kept, but faint. A pane with NO edge at all loses its silhouette
+   * against a bright strip; a pane with a uniform bright one is a selection box. Faint edge
+   * plus bright corners reads as a framed sheet of glass, which is what it is.
+   */
+  rimFaintGain: 0.06,
+  /**
+   * How far a BREAKABLE pane's body colour is pulled from the theme's glass tint towards
+   * the reserved hue. void-cathedral's tint is #dfe9ec - chroma 0.019, which is white with
+   * a rumour of blue - so all the cyan a player ever saw came from the rim. The moment the
+   * face was given real presence it diluted the pane towards that near-white and the face
+   * chroma fell from 0.081 to 0.034. If the face is going to be most of the pixels, the
+   * face is what has to carry the reserved hue.
+   */
+  breakableTintMix: 0.78,
+  bracketFeatherUv: 0.02,
+  /**
+   * A BROAD facet catch across the whole face. Exponent near 1 on purpose: the existing
+   * `streak` is a tight lobe that lands as a small hotspot, and a hotspot is not a surface.
+   * A wide sheen gradient is what tells the eye there is a plane here at all.
+   */
+  faceSpecPower: 1.6,
+  faceSpecGain: 0.18,
 });
 
 const SHAPE = Object.freeze({
@@ -151,12 +188,33 @@ export function glassMaterial(options: GlassOptions): MeshStandardNodeMaterial {
   const rimUv = uvPixel.mul(float(LEGIBILITY.rimPixels)).max(float(LEGIBILITY.rimMinUv));
   const rim = smoothstep(rimUv, float(0), borderDistance);
 
+  // CORNER BRACKETS. `centred` is |uv - 0.5| per axis, so `0.5 - centred.x` is the distance
+  // to the nearest vertical edge and `centred.y` says how close to a corner we are along the
+  // other axis. An arm is therefore "on an edge AND near a corner", and the max() of the two
+  // orientations gives four Ls. No geometry, no extra draw - the same fwidth-derived width
+  // as the rim, so the brackets stay pixel-constant with distance exactly as it does.
+  const armEdge = float(0.5 - LEGIBILITY.bracketArm);
+  const armFeather = armEdge.sub(float(LEGIBILITY.bracketFeatherUv));
+  const armX = smoothstep(armFeather, armEdge, centred.x);
+  const armY = smoothstep(armFeather, armEdge, centred.y);
+  const edgeX = smoothstep(rimUv, float(0), float(0.5).sub(centred.x));
+  const edgeY = smoothstep(rimUv, float(0), float(0.5).sub(centred.y));
+  const bracket = edgeX.mul(armY).max(edgeY.mul(armX));
+
+  // The broad facet catch - see LEGIBILITY.faceSpecPower.
+  const faceSpec = pow(
+    dot(normalize(normalView), key).clamp(0, 1),
+    float(LEGIBILITY.faceSpecPower),
+  );
+
   // Contact darkening just inside the rim. Without it a pane overlapping a bright ceiling
   // strip loses its silhouette entirely - the rim and the background both read as light.
   const shadeUv = uvPixel.mul(float(LEGIBILITY.shadeWidthPixels));
   const shade = smoothstep(shadeUv.add(rimUv), rimUv, borderDistance).mul(float(LEGIBILITY.shadeDepth));
 
   const isBreakable = options.role === 'breakable';
+  // A hittable pane's BODY carries the reserved hue - see LEGIBILITY.breakableTintMix.
+  if (isBreakable) material.color.lerp(options.rimColour, LEGIBILITY.breakableTintMix);
   let emissive: Node<'vec3'> = vec3(0, 0, 0);
   const edgeColour = vec3(options.edge.r, options.edge.g, options.edge.b);
   // Rim carries the RESERVED HUE, never the theme's raw edge colour: void-cathedral's edge
@@ -165,7 +223,13 @@ export function glassMaterial(options: GlassOptions): MeshStandardNodeMaterial {
 
   if (isBreakable) {
     // Additive and ungated by tier: the rim is not an effect, it is how a target is read.
-    emissive = emissive.add(rimColour.mul(rim).mul(float(LEGIBILITY.rimGain)));
+    // Bright at the corners, faint all the way round: the silhouette stays sealed and the
+    // eye still gets an unambiguous 'framed pane' rather than an annotation stroke.
+    emissive = emissive.add(rimColour.mul(bracket).mul(float(LEGIBILITY.rimGain)));
+    emissive = emissive.add(rimColour.mul(rim).mul(float(LEGIBILITY.rimFaintGain)));
+    // The face gets its own light, so the middle is a surface rather than a hole with a
+    // border around it. White, not the reserved hue: this is a highlight, not a target cue.
+    emissive = emissive.add(edgeColour.mul(faceSpec).mul(float(LEGIBILITY.faceSpecGain)));
   }
   if (f.fresnel) emissive = emissive.add(edgeColour.mul(fresnel).mul(float(isBreakable ? 1 : 0.25)));
   if (f.bevel && isBreakable) emissive = emissive.add(rimColour.mul(bevel).mul(float(SHAPE.bevelGain * 0.5)));
@@ -185,7 +249,7 @@ export function glassMaterial(options: GlassOptions): MeshStandardNodeMaterial {
   if (f.fresnel) opacity = mix(floorOpacity, float(1), fresnel);
   if (f.bevel) opacity = opacity.add(bevel.mul(float(0.5)));
   if (f.microNoise) opacity = opacity.add(noise.mul(float(SHAPE.noiseAmount)));
-  if (isBreakable) opacity = opacity.add(rim);
+  if (isBreakable) opacity = opacity.add(bracket).add(rim.mul(float(0.15)));
   // Contact darkening removes light rather than adding it, which is what separates the
   // pane from a bright background instead of competing with it.
   opacity = opacity.sub(shade.mul(float(0.25))).clamp(0, 1);

@@ -102,6 +102,14 @@ export class Game {
     );
   }
 
+  /** Adds a subject without clearing what is already placed. */
+  placeAlso(kind: 'pane' | 'decorative' | 'crystal', distanceM: number, offsetX = 0): Promise<void> {
+    return this.page.evaluate(
+      ([k, d, x]) => window.__sp!.placeAlso(k as 'pane', d as number, x as number),
+      [kind, distanceM, offsetX] as const,
+    );
+  }
+
   clearField(): Promise<void> {
     return this.page.evaluate(() => window.__sp!.clearField());
   }
@@ -147,6 +155,7 @@ declare global {
       unfreeze(): void;
       step(dtMs: number): void;
       place(kind: 'pane' | 'decorative' | 'crystal', distanceM: number, offsetX?: number): void;
+      placeAlso(kind: 'pane' | 'decorative' | 'crystal', distanceM: number, offsetX?: number): void;
       clearField(): void;
       advanceTo(approach: number): void;
       throwAt(ndcX: number, ndcY: number): void;
