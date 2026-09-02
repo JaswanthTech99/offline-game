@@ -11,7 +11,7 @@
 import { createServer } from 'node:http';
 import { stat } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
-import { join, resolve, dirname, extname, normalize } from 'node:path';
+import { join, resolve, dirname, extname, normalize, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { networkInterfaces } from 'node:os';
 
@@ -44,7 +44,9 @@ const server = createServer(async (req, res) => {
       'cache-control': 'no-store',
     };
     if (ext === '.apk') {
-      headers['content-disposition'] = 'attachment; filename="shatterpoint-debug.apk"';
+      // The REQUESTED name, not a hardcoded one: with two variants on offer a fixed
+      // filename saves the release build under the debug build's name.
+      headers['content-disposition'] = `attachment; filename="${basename(file)}"`;
     }
     res.writeHead(200, headers);
     if (req.method === 'HEAD') {

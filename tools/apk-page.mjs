@@ -14,17 +14,42 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const DIR = join(ROOT, 'exports/apk');
-const APK = join(DIR, 'shatterpoint-debug.apk');
+/**
+ * Both variants, when both exist. The release build is less than half the size and is the
+ * one worth testing on a phone; the debug build is only preferable when you need CDP to
+ * attach, which is what the device gates use.
+ */
+const VARIANTS = [
+  {
+    file: 'shatterpoint-release.apk',
+    label: 'Release',
+    blurb: 'Smaller and faster. Signed with the Android debug key so it installs. Use this one.',
+    primary: true,
+  },
+  {
+    file: 'shatterpoint-debug.apk',
+    label: 'Debug',
+    blurb: 'Unminified, remotely inspectable over CDP. Only needed for the device test harness.',
+    primary: false,
+  },
+];
 
-if (!existsSync(APK)) {
+const builds = VARIANTS.filter((v) => existsSync(join(DIR, v.file))).map((v) => {
+  const path = join(DIR, v.file);
+  const bytes = statSync(path).size;
+  return {
+    ...v,
+    bytes,
+    mb: (bytes / 1048576).toFixed(1),
+    sha: createHash('sha256').update(readFileSync(path)).digest('hex'),
+    built: statSync(path).mtime.toISOString().slice(0, 16).replace('T', ' '),
+  };
+});
+
+if (builds.length === 0) {
   console.error('  no APK at exports/apk/ - run `npm run mobile:apk` first');
   process.exit(1);
 }
-
-const bytes = statSync(APK).size;
-const mb = (bytes / 1048576).toFixed(1);
-const sha = createHash('sha256').update(readFileSync(APK)).digest('hex');
-const built = statSync(APK).mtime.toISOString().slice(0, 16).replace('T', ' ');
 
 // The boot variant: grain and bloom already stripped, ids already namespaced.
 const icon = readFileSync(join(ROOT, 'src/assets/icon/icon-boot.svg'), 'utf8')
@@ -38,7 +63,8 @@ const html = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="theme-color" content="#04040c" />
 <title>SHATTERPOINT &mdash; Android test build</title>
-<link rel="icon" type="image/svg+xml" href="/icon.svg" />
+<!-- Relative, so the page also works opened straight off disk with file://. -->
+<link rel="icon" type="image/svg+xml" href="./icon.svg" />
 <style>
   /* Same four accents and the same dark-based glass as the game, so the download page and
      the thing it hands you look like one product. */
@@ -98,6 +124,12 @@ const html = `<!doctype html>
     min-block-size: 48px;
   }
   a.btn:active { transform: translateY(1px); }
+  /* The debug build is the exception, not the default, so it does not get the accent. */
+  a.btn--quiet {
+    background: transparent;
+    color: var(--ice);
+    box-shadow: inset 0 0 0 1px var(--hair);
+  }
   .meta { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 12.5px; }
   .meta dt { color: var(--ink-faint); letter-spacing: 0.1em; text-transform: uppercase; }
   .meta dd { margin: 0; font-family: ui-monospace, "JetBrains Mono", Menlo, monospace; overflow-wrap: anywhere; }
@@ -114,19 +146,30 @@ const html = `<!doctype html>
   <h1>SHATTERPOINT</h1>
   <p class="sub">Android test build</p>
 
-  <div class="card">
-    <!-- download attribute: same-origin, so the browser saves it rather than trying to
-         navigate to it and rendering a binary. -->
-    <a class="btn" href="./shatterpoint-debug.apk" download="shatterpoint-debug.apk">
-      Download APK &middot; ${mb} MB
+  ${builds
+    .map(
+      (b) => `<div class="card">
+    <!-- download attribute: same-origin, so the browser saves the file rather than trying
+         to navigate to it and rendering a binary. -->
+    <a class="btn${b.primary ? '' : ' btn--quiet'}" href="./${b.file}" download="${b.file}">
+      Download ${b.label} &middot; ${b.mb} MB
     </a>
+    <p class="note" style="margin-top:0">${b.blurb}</p>
     <dl class="meta">
-      <dt>File</dt><dd>shatterpoint-debug.apk</dd>
-      <dt>Size</dt><dd>${bytes.toLocaleString('en-US')} bytes</dd>
+      <dt>File</dt><dd>${b.file}</dd>
+      <dt>Size</dt><dd>${b.bytes.toLocaleString('en-US')} bytes</dd>
+      <dt>Built</dt><dd>${b.built} UTC</dd>
+      <dt>SHA-256</dt><dd>${b.sha}</dd>
+    </dl>
+  </div>`,
+    )
+    .join('\n  ')}
+
+  <div class="card">
+    <dl class="meta">
       <dt>Package</dt><dd>com.jaswanthtech.shatterpoint</dd>
       <dt>Min / target</dt><dd>Android 5.1 (API 22) / API 34</dd>
-      <dt>Built</dt><dd>${built} UTC</dd>
-      <dt>SHA-256</dt><dd>${sha}</dd>
+      <dt>Signed by</dt><dd>Android debug key (both variants)</dd>
     </dl>
   </div>
 
@@ -142,14 +185,15 @@ const html = `<!doctype html>
   </div>
 
   <div class="card">
-    <h2>What this build is</h2>
+    <h2>What these builds are</h2>
     <p class="note">
-      A <strong>debug</strong> build, signed with the standard Android debug key &mdash; fine for
-      testing, not for distribution. It picks its own quality tier from what your device
-      reports; in a WebView without WebGPU that is <code>MOBILE_LOW</code>, rendering at 0.6
-      scale and reconstructing with FSR1. If your device advertises WebGPU but cannot sustain
-      it you will see one automatic reload into the WebGL path on first launch &mdash; that is
-      the fallback working, not a crash.
+      Both are signed with the standard Android <strong>debug key</strong> &mdash; fine for
+      testing, not for distribution. The game picks its own quality tier from what your
+      device reports: it reads the GPU renderer string, core count and memory, then measures
+      two dozen real frames before committing, so a flagship is no longer forced onto the
+      budget preset just because Android WebView has no WebGPU. If your device advertises
+      WebGPU but cannot sustain it you will see one automatic reload into the WebGL path on
+      first launch &mdash; that is the fallback working, not a crash.
     </p>
   </div>
 </main>
@@ -158,6 +202,7 @@ const html = `<!doctype html>
 `;
 
 writeFileSync(join(DIR, 'index.html'), html);
-console.log(`  wrote exports/apk/index.html`);
-console.log(`    apk    ${bytes.toLocaleString('en-US')} bytes (${mb} MB)`);
-console.log(`    sha256 ${sha}`);
+console.log('  wrote exports/apk/index.html');
+for (const b of builds) {
+  console.log(`    ${b.label.padEnd(8)} ${b.bytes.toLocaleString('en-US').padStart(12)} bytes  ${b.sha.slice(0, 16)}...`);
+}
