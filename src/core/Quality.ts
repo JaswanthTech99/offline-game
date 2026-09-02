@@ -675,7 +675,13 @@ export function deriveRenderScale(
 ): number {
   const displayPixels = Math.max(1, displayWidth * displayHeight * devicePixelRatio * devicePixelRatio);
   const ideal = Math.sqrt(budget.pixelBudget / displayPixels);
-  const clamped = Math.min(Math.max(ideal, budget.renderScaleMin), budget.renderScaleMax);
+
+  // Boot never starts above native. The budget says what the tier would LIKE to spend; only
+  // the dynamic-resolution governor, watching real frame times, is allowed to spend it.
+  // Starting at the derived 2.0 shipped a stutter on any host that could not sustain it,
+  // and a first impression of lag is not recoverable by climbing back down afterwards.
+  const startCeiling = Math.min(budget.renderScaleMax, SUPERSAMPLE_BOOT_CEILING);
+  const clamped = Math.min(Math.max(ideal, budget.renderScaleMin), startCeiling);
 
   // Snap DOWN to a rung: rounding up would put the frame over the budget it was derived from.
   let best = RENDER_SCALE_LADDER[0] ?? 1;
@@ -684,6 +690,27 @@ export function deriveRenderScale(
   }
   return best;
 }
+
+/**
+ * Dynamic resolution. Deriving render scale from a pixel BUDGET says what the tier would
+ * like to afford; only measured frame time says what the machine can actually deliver. A
+ * budget without a feedback loop is an aspiration, and on a weak host it is a stutter.
+ */
+/** Boot never exceeds native; the governor earns anything above it. */
+export const SUPERSAMPLE_BOOT_CEILING = 1.0;
+
+export const DYNAMIC_RESOLUTION = Object.freeze({
+  /** Frames over budget before dropping a rung. Short: a drop must feel immediate. */
+  dropAfterFrames: 24,
+  /** Frames comfortably under budget before climbing. Long: climbing must not oscillate. */
+  raiseAfterFrames: 240,
+  /** Fraction of the frame budget that counts as "over". */
+  overBudgetRatio: 1.15,
+  /** Fraction below which there is room to climb. */
+  underBudgetRatio: 0.62,
+  /** Frames to ignore at boot while shaders compile and caches warm. */
+  warmupFrames: 90,
+});
 
 export const REDUCED_MOTION_TIER: Tier = 'MOBILE_LOW';
 

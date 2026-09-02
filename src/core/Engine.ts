@@ -42,7 +42,7 @@ import type { Unsubscribe } from './Events';
 import { Loop } from './Loop';
 import type { LoopStats } from './Loop';
 import type { QualityResolution, Tier } from './Quality';
-import { FIXED_STEP_MS, RENDER_SCALE_LADDER, deriveRenderScale, resolveTier } from './Quality';
+import { DYNAMIC_RESOLUTION, FIXED_STEP_MS, RENDER_SCALE_LADDER, deriveRenderScale, resolveTier } from './Quality';
 import type { Frames, Tickable } from './types';
 
 /** What the engine needs in order to draw at all. Supplied by the world layer. */
@@ -128,6 +128,9 @@ export class Engine {
 
   private rafHandle: number | null = null;
   private renderScaleValue: number;
+  private frameIndex = 0;
+  private overBudgetFrames = 0;
+  private underBudgetFrames = 0;
   private disposed = false;
 
   /** Guards against re-emitting an identical resize on every ResizeObserver notification. */
@@ -362,8 +365,56 @@ export class Engine {
 
     const stats = this.loop.advance(nowMs);
     this.renderFrame();
+    this.governResolution(stats.frameMs);
     this.events.emit('engine:frame', stats);
   };
+
+  /** Presents one frame on demand. Used by the automation bridge while the loop is paused. */
+  renderOnce(): void {
+    this.renderFrame();
+  }
+
+  /**
+   * Dynamic resolution. Render scale is DERIVED from a pixel budget, which is a statement
+   * about what the tier would like to afford - not about what this machine can deliver.
+   * Without this loop a weak host renders at 2x supersampling and stutters, which is
+   * exactly what shipping the derivation alone produced.
+   */
+  private governResolution(frameMs: number): void {
+    this.frameIndex += 1;
+    if (this.frameIndex < DYNAMIC_RESOLUTION.warmupFrames) return;
+
+    const target = 1000 / this.qualityValue.budget.targetFps;
+    if (frameMs > target * DYNAMIC_RESOLUTION.overBudgetRatio) {
+      this.overBudgetFrames += 1;
+      this.underBudgetFrames = 0;
+    } else if (frameMs < target * DYNAMIC_RESOLUTION.underBudgetRatio) {
+      this.underBudgetFrames += 1;
+      this.overBudgetFrames = 0;
+    } else {
+      this.overBudgetFrames = 0;
+      this.underBudgetFrames = 0;
+    }
+
+    if (this.overBudgetFrames >= DYNAMIC_RESOLUTION.dropAfterFrames) {
+      this.overBudgetFrames = 0;
+      this.stepScale(-1);
+    } else if (this.underBudgetFrames >= DYNAMIC_RESOLUTION.raiseAfterFrames) {
+      this.underBudgetFrames = 0;
+      this.stepScale(1);
+    }
+  }
+
+  /** Moves one rung along the ladder, within the tier's window. */
+  private stepScale(direction: number): void {
+    const rungs = RENDER_SCALE_LADDER;
+    const here = rungs.indexOf(this.renderScaleValue);
+    const next = rungs[here + direction];
+    if (here < 0 || next === undefined) return;
+    if (this.setRenderScale(next)) {
+      this.events.emit('engine:quality', this.qualityValue);
+    }
+  }
 
   private renderFrame(): void {
     if (this.pipeline !== null) {

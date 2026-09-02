@@ -44,6 +44,7 @@ import { Color, PerspectiveCamera, Scene, Vector2 } from 'three/webgpu';
 
 import { probeCaps } from './core/Caps';
 import { collectDiagnostics, reportDiagnostics } from './core/Diagnostics';
+import { installDebugBridge } from './core/DebugBridge';
 import { Engine } from './core/Engine';
 import type { EngineOptions } from './core/Engine';
 import type { Tier } from './core/Quality';
@@ -601,6 +602,19 @@ async function boot(shell: Shell): Promise<App> {
   globalThis.setTimeout(() => {
     shell.veil.remove();
   }, VEIL_REMOVE_MS);
+
+  installDebugBridge({
+    engine,
+    renderer: engine.renderer,
+    scene,
+    camera,
+    field: playfield,
+    quality,
+    tierSource: tierOverride === null ? 'detected' : 'override',
+    canvas: shell.canvas,
+    builtStages: () => post.stages.filter((st) => st.built).map((st) => st.effect),
+    ballWorld: () => playfield.newestBallPosition(),
+  });
 
   const app: App = { engine, physics, post, overlay, hud, scene, camera, playfield };
 

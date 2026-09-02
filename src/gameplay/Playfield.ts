@@ -1059,6 +1059,36 @@ export class Playfield implements Tickable, Disposable {
     return this.fx.phase;
   }
 
+  /** Live breakable panes on the field. */
+  get paneCount(): number {
+    let n = 0;
+    for (const t of this.targets) if (t.live && t.kind === 'pane') n++;
+    return n;
+  }
+
+  get crystalCount(): number {
+    let n = 0;
+    for (const t of this.targets) if (t.live && t.kind === 'crystal') n++;
+    return n;
+  }
+
+  /** Live thrown balls. */
+  get liveBalls(): number {
+    return this.liveBallCount();
+  }
+
+  /** World position of the most recently thrown live ball, for the visibility gate. */
+  newestBallPosition(): { x: number; y: number; z: number } | null {
+    let best: Ball | null = null;
+    for (const b of this.balls) {
+      if (!b.live) continue;
+      if (best === null || b.ageMs < best.ageMs) best = b;
+    }
+    if (best === null) return null;
+    const p = best.mesh.position;
+    return { x: p.x, y: p.y, z: p.z };
+  }
+
   get liveShards(): number {
     return this.fx.liveShards;
   }
