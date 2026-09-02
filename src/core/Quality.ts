@@ -969,6 +969,8 @@ export const DYNAMIC_RESOLUTION = Object.freeze({
   /** Frames to ignore at boot while shaders compile and caches warm. */
   warmupFrames: 90,
 });
+// This axis alone is not a governor - see TIER_GOVERNOR further down for the coarse axis
+// that takes over once the render scale is pinned to the tier's floor and still losing.
 
 export const REDUCED_MOTION_TIER: Tier = 'MOBILE_LOW';
 
@@ -1268,6 +1270,347 @@ export function resolveTier(caps: DeviceCaps, override: Tier | null = null): Qua
   };
 }
 
+/* ------------------------------------------------------------------------------------- *
+ * THE TIER GOVERNOR - the second axis of runtime quality.
+ *
+ * WHY ONE AXIS WAS NOT ENOUGH
+ * `DYNAMIC_RESOLUTION` above moves RENDER SCALE only, inside the current tier's own
+ * min/max window. On a OnePlus 12 running MOBILE_ULTRA that window floors at 0.8: the
+ * governor stepped 1.0 -> 0.9 -> 0.8, ran out of ladder, and then watched a 33ms frame
+ * against a 16.6ms budget for the rest of the session with no move left to make. Scale is
+ * the only lever it had, and scale was already spent.
+ *
+ * The cost that actually mattered was never resolution. It was ring count, post stages,
+ * light contributions and shard budget - every one of which is a TIER row, not a scale
+ * multiplier. So the governor gets a second, coarser axis: when the fine lever is at its
+ * stop and the frame is still over, drop the whole tier and start again from that tier's
+ * default scale.
+ *
+ * ORDER OF PREFERENCE, and why
+ *   1. Scale down. Cheap, instant, perfectly reversible, invisible to every other system.
+ *   2. Tier down, but ONLY once scale is at the tier's floor. A tier change rebuilds
+ *      budgets and re-dresses the DOM; it is not something to do speculatively.
+ *   3. Scale up, but never past the tier's DEFAULT while a better tier is still reachable -
+ *      surplus GPU buys a better tier before it buys supersampling. Only at the ceiling
+ *      tier, where there is nothing better to buy, may scale climb into supersampling.
+ *   4. Tier up, last and slowest of all.
+ *
+ * WHY THE HYSTERESIS IS DELIBERATELY LOPSIDED
+ * A phone is not a stationary target. It posts desktop frame times for the first twenty
+ * seconds and then the SoC throttles, so the tier that was right in second one is wrong by
+ * minute three - and the player is holding the thing while it happens. Being one tier too
+ * low is a slightly softer image nobody reports; being one tier too high is a stutter that
+ * ends the session. So demotion is measured in seconds and promotion in tens of seconds,
+ * and every demotion makes the next promotion harder still (`promotePenaltyFrames`): a
+ * device that has already proved it cannot hold a tier does not get to re-litigate that
+ * every half minute for the rest of the run. Thrash is worse than either endpoint, because
+ * a tier change costs a settle window during which the frame is unrepresentative anyway.
+ * ------------------------------------------------------------------------------------- */
+
+/** Milliseconds in a second. Named so the conversions below read as budgets, not as maths. */
+const MS_PER_SECOND = 1000;
+
+/** Float slop when comparing a scale against a ladder rung or a tier window edge. */
+const RUNG_EPSILON = 1e-6;
+
+/**
+ * Every tier ordered WORST to BEST. `PROMOTION_ORDER` above deliberately omits SHOWCASE
+ * because the boot probe must never measure its way INTO a 10fps stills tier; the governor
+ * needs the full ladder anyway, because a machine sitting on SHOWCASE by explicit request
+ * must still be able to fall off it when it cannot hold even that.
+ */
+export const TIER_LADDER: readonly Tier[] = Object.freeze([
+  'MOBILE_LOW',
+  'MOBILE_HIGH',
+  'MOBILE_ULTRA',
+  'DESKTOP_HIGH',
+  'ULTRA_4K',
+  'SHOWCASE',
+]);
+
+/**
+ * The governor may never demote past this. Below MOBILE_LOW there is no tier, only a black
+ * screen with a good frame time, and a game that has switched everything off has not
+ * recovered - it has quit.
+ */
+export const GOVERNOR_FLOOR_TIER: Tier = 'MOBILE_LOW';
+
+/**
+ * The highest tier the runtime governor may ever climb to on a device class, mirroring
+ * `ceilingFor` in main.ts - a probe run on a thermally cold phone must not be able to write
+ * a cheque the device cannot cash three minutes in, and neither must the governor.
+ */
+export const DEVICE_CLASS_CEILING: Readonly<Record<'mobile' | 'desktop', Tier>> = Object.freeze({
+  mobile: 'MOBILE_ULTRA',
+  desktop: 'ULTRA_4K',
+});
+
+export function deviceClassCeiling(caps: Pick<DeviceCaps, 'isMobile'>): Tier {
+  return caps.isMobile ? DEVICE_CLASS_CEILING.mobile : DEVICE_CLASS_CEILING.desktop;
+}
+
+/** Whichever of the two sits higher on `TIER_LADDER`. */
+export function higherTier(a: Tier, b: Tier): Tier {
+  return TIER_LADDER.indexOf(a) >= TIER_LADDER.indexOf(b) ? a : b;
+}
+
+export const TIER_GOVERNOR = Object.freeze({
+  /**
+   * Frames the scale must spend AT THE TIER FLOOR and still over budget before the tier
+   * itself drops. ~1.5s at 60fps, ~3s at 30fps. Short on purpose: by the time this fires,
+   * the cheap lever has already been tried and has already failed.
+   */
+  demoteAfterFrames: 90,
+  /**
+   * How much one in-budget frame pays back off the demote counter. Making this a leaky
+   * bucket rather than a reset means an occasional good frame in a sea of bad ones cannot
+   * hold a struggling device on a tier forever - a strict reset was how the scale axis
+   * stalled on hosts whose frame times alternate.
+   */
+  overDecayPerGoodFrame: 1,
+  /**
+   * Clean frames before the FIRST tier promotion is considered. 1800 frames is half a
+   * minute at 60fps - deliberately an order of magnitude slower than `demoteAfterFrames`.
+   */
+  promoteAfterFrames: 1800,
+  /** Added to that threshold for every demotion already suffered this session. */
+  promotePenaltyFrames: 1800,
+  /**
+   * Hard cap on the penalty. A device that throttled early in a long session must still be
+   * able to recover once it has cooled; the penalty is meant to be discouraging, not final.
+   */
+  promoteCeilingFrames: 7200,
+  /**
+   * Frames ignored entirely after a tier change, while pipelines rebuild and caches refill.
+   * Judging the new tier on the frames spent switching to it is how a governor oscillates.
+   */
+  settleFrames: 120,
+  /**
+   * Fraction of the CANDIDATE tier's frame budget a frame must already fit inside before
+   * promotion is considered. Measured against the candidate, never the current tier: the
+   * question is not "is there room here", it is "would there still be room up there", and
+   * the tier above costs more to draw. 0.55 leaves the climb most of a budget to absorb the
+   * extra rings, stages and lights it is about to switch on.
+   */
+  promoteHeadroomRatio: 0.55,
+});
+
+/** Frames of clean headroom required before the next promotion, given past demotions. */
+export function promoteThresholdFrames(demotions: number): number {
+  return Math.min(
+    TIER_GOVERNOR.promoteAfterFrames + demotions * TIER_GOVERNOR.promotePenaltyFrames,
+    TIER_GOVERNOR.promoteCeilingFrames,
+  );
+}
+
+/** Index of the ladder rung nearest `scale`, ignoring any tier window. */
+export function nearestRungIndex(scale: number): number {
+  let index = 0;
+  let bestDistance = Infinity;
+  for (let i = 0; i < RENDER_SCALE_LADDER.length; i += 1) {
+    const rung = RENDER_SCALE_LADDER[i];
+    if (rung === undefined) continue;
+    const distance = Math.abs(rung - scale);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      index = i;
+    }
+  }
+  return index;
+}
+
+/**
+ * Nearest rung inside [min, max]. A window containing no rung is a table bug, but the frame
+ * still has to be drawn, so the raw clamp is returned rather than nothing.
+ */
+export function snapRenderScale(scale: number, min: number, max: number): number {
+  let best: number | null = null;
+  let bestDistance = Infinity;
+  for (const rung of RENDER_SCALE_LADDER) {
+    if (rung < min - RUNG_EPSILON || rung > max + RUNG_EPSILON) continue;
+    const distance = Math.abs(rung - scale);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = rung;
+    }
+  }
+  return best ?? Math.min(Math.max(scale, min), max);
+}
+
+/** The next rung coarser (-1) or finer (+1), or null when the window has no such rung. */
+export function rungNeighbour(scale: number, direction: -1 | 1, min: number, max: number): number | null {
+  const rung = RENDER_SCALE_LADDER[nearestRungIndex(scale) + direction];
+  if (rung === undefined) return null;
+  if (rung < min - RUNG_EPSILON || rung > max + RUNG_EPSILON) return null;
+  return rung;
+}
+
+/** Everything the governor remembers between frames. Immutable; replaced, never mutated. */
+export interface GovernorState {
+  readonly tier: Tier;
+  readonly renderScale: number;
+  /** Frames seen since the governor was armed. Below `warmupFrames` nothing is judged. */
+  readonly frames: number;
+  /** Frames still to be ignored after a tier change. */
+  readonly settle: number;
+  readonly scaleOverFrames: number;
+  readonly scaleUnderFrames: number;
+  /** Leaky: only accumulates while the scale is already at the tier floor. */
+  readonly tierOverFrames: number;
+  /** Strict: any frame without candidate-tier headroom resets it to zero. */
+  readonly tierUnderFrames: number;
+  /** Governor demotions so far this session. Only ever cleared by an explicit tier change. */
+  readonly demotions: number;
+}
+
+/** The governor's bounds. `ceiling` is whatever the probe or the player last asked for. */
+export interface GovernorLimits {
+  readonly ceiling: Tier;
+  readonly floor: Tier;
+}
+
+export type GovernorAction =
+  | { readonly kind: 'hold' }
+  | { readonly kind: 'scale'; readonly direction: -1 | 1; readonly to: number }
+  | { readonly kind: 'tier'; readonly direction: -1 | 1; readonly to: Tier };
+
+export interface GovernorStep {
+  readonly state: GovernorState;
+  readonly action: GovernorAction;
+}
+
+export function newGovernorState(tier: Tier, renderScale: number, demotions = 0): GovernorState {
+  return {
+    tier,
+    renderScale,
+    frames: 0,
+    settle: 0,
+    scaleOverFrames: 0,
+    scaleUnderFrames: 0,
+    tierOverFrames: 0,
+    tierUnderFrames: 0,
+    demotions,
+  };
+}
+
+function afterTierChange(state: GovernorState, tier: Tier, demotions: number): GovernorState {
+  const budget = QUALITY[tier];
+  return {
+    tier,
+    // The new tier's DEFAULT, not the scale we were struggling at: a demotion that kept a
+    // floored scale would spend its whole win on resolution the player never asked for.
+    renderScale: snapRenderScale(budget.renderScale, budget.renderScaleMin, budget.renderScaleMax),
+    frames: state.frames,
+    settle: TIER_GOVERNOR.settleFrames,
+    scaleOverFrames: 0,
+    scaleUnderFrames: 0,
+    tierOverFrames: 0,
+    tierUnderFrames: 0,
+    demotions,
+  };
+}
+
+/**
+ * One frame of governor. PURE: no engine, no renderer, no clock - which is what makes the
+ * whole two-axis policy testable by feeding it a list of numbers rather than by waiting for
+ * a real device to get hot. The caller applies the action and hands back the state it
+ * actually achieved, because `snapRenderScale` and the tier tables have the final say.
+ */
+export function governorStep(state: GovernorState, frameMs: number, limits: GovernorLimits): GovernorStep {
+  const frames = state.frames + 1;
+  const hold: GovernorAction = { kind: 'hold' };
+
+  if (frames < DYNAMIC_RESOLUTION.warmupFrames) {
+    return { state: { ...state, frames }, action: hold };
+  }
+  if (state.settle > 0) {
+    return {
+      state: {
+        ...state,
+        frames,
+        settle: state.settle - 1,
+        scaleOverFrames: 0,
+        scaleUnderFrames: 0,
+        tierOverFrames: 0,
+        tierUnderFrames: 0,
+      },
+      action: hold,
+    };
+  }
+
+  const budget = QUALITY[state.tier];
+  const target = MS_PER_SECOND / budget.targetFps;
+  const over = frameMs > target * DYNAMIC_RESOLUTION.overBudgetRatio;
+  const under = frameMs < target * DYNAMIC_RESOLUTION.underBudgetRatio;
+
+  const here = TIER_LADDER.indexOf(state.tier);
+  const floorIndex = TIER_LADDER.indexOf(limits.floor);
+  const ceilingIndex = TIER_LADDER.indexOf(limits.ceiling);
+  const coarser = here > floorIndex && here > 0 ? TIER_LADDER[here - 1] ?? null : null;
+  const finer = here >= 0 && here < ceilingIndex ? TIER_LADDER[here + 1] ?? null : null;
+
+  /**
+   * Surplus buys a TIER before it buys supersampling: while a better tier is still
+   * reachable the scale axis may only climb back to this tier's default. At the ceiling
+   * tier there is nothing better to buy, so the full window - rungs above 1.0 included -
+   * opens up. This is also what makes "scale has nothing left to give" a usable promotion
+   * trigger instead of a demand that every phone first supersample to 2.0.
+   */
+  const climbCeiling = finer === null ? budget.renderScaleMax : budget.renderScale;
+  const coarserRung = rungNeighbour(state.renderScale, -1, budget.renderScaleMin, budget.renderScaleMax);
+  const finerRung = rungNeighbour(state.renderScale, 1, budget.renderScaleMin, climbCeiling);
+  const scaleAtFloor = coarserRung === null;
+  const scaleSpent = finerRung === null;
+
+  const clean =
+    finer !== null &&
+    frameMs < (MS_PER_SECOND / QUALITY[finer].targetFps) * TIER_GOVERNOR.promoteHeadroomRatio;
+
+  const scaleOverFrames = over ? state.scaleOverFrames + 1 : 0;
+  const scaleUnderFrames = !over && under ? state.scaleUnderFrames + 1 : 0;
+  const tierOverFrames = !scaleAtFloor
+    ? 0
+    : over
+      ? state.tierOverFrames + 1
+      : Math.max(0, state.tierOverFrames - TIER_GOVERNOR.overDecayPerGoodFrame);
+  const tierUnderFrames = scaleSpent && clean ? state.tierUnderFrames + 1 : 0;
+
+  const next: GovernorState = {
+    ...state,
+    frames,
+    scaleOverFrames,
+    scaleUnderFrames,
+    tierOverFrames,
+    tierUnderFrames,
+  };
+
+  if (coarser !== null && scaleAtFloor && tierOverFrames >= TIER_GOVERNOR.demoteAfterFrames) {
+    return {
+      state: afterTierChange(next, coarser, state.demotions + 1),
+      action: { kind: 'tier', direction: -1, to: coarser },
+    };
+  }
+  if (coarserRung !== null && scaleOverFrames >= DYNAMIC_RESOLUTION.dropAfterFrames) {
+    return {
+      state: { ...next, renderScale: coarserRung, scaleOverFrames: 0, tierOverFrames: 0 },
+      action: { kind: 'scale', direction: -1, to: coarserRung },
+    };
+  }
+  if (finer !== null && scaleSpent && tierUnderFrames >= promoteThresholdFrames(state.demotions)) {
+    return {
+      state: afterTierChange(next, finer, state.demotions),
+      action: { kind: 'tier', direction: 1, to: finer },
+    };
+  }
+  if (finerRung !== null && scaleUnderFrames >= DYNAMIC_RESOLUTION.raiseAfterFrames) {
+    return {
+      state: { ...next, renderScale: finerRung, scaleUnderFrames: 0, tierUnderFrames: 0 },
+      action: { kind: 'scale', direction: 1, to: finerRung },
+    };
+  }
+  return { state: next, action: hold };
+}
+
 /**
  * Self-check for the tables above. The ms budget is a promise the profiler holds this file
  * to, so an edit that makes the promise unkeepable should be caught by tooling, not by a
@@ -1311,6 +1654,36 @@ export function validateQualityTable(): string[] {
     if (budget.physicsSubstepCap < Math.ceil(FIXED_STEP_HZ / budget.targetFps)) {
       violations.push(`${tier}: physicsSubstepCap ${budget.physicsSubstepCap} cannot cover ${FIXED_STEP_HZ}Hz at ${budget.targetFps}fps`);
     }
+    // A tier the governor cannot address is a tier a throttling device can be stranded on.
+    if (!TIER_LADDER.includes(tier)) {
+      violations.push(`${tier}: missing from TIER_LADDER, so the governor can neither reach nor leave it`);
+    }
+  }
+
+  if (!TIER_LADDER.includes(GOVERNOR_FLOOR_TIER)) {
+    violations.push(`tier governor: floor ${GOVERNOR_FLOOR_TIER} is not on TIER_LADDER`);
+  }
+  // Asymmetry is the whole point: a device throttles in seconds and cools in minutes, so a
+  // table where promotion is not markedly slower than demotion is a table that oscillates.
+  if (TIER_GOVERNOR.promoteAfterFrames <= TIER_GOVERNOR.demoteAfterFrames) {
+    violations.push(
+      `tier governor: promoteAfterFrames ${TIER_GOVERNOR.promoteAfterFrames} is not slower than ` +
+        `demoteAfterFrames ${TIER_GOVERNOR.demoteAfterFrames}; the governor would thrash`,
+    );
+  }
+  if (TIER_GOVERNOR.promoteCeilingFrames < promoteThresholdFrames(0)) {
+    violations.push(
+      `tier governor: promoteCeilingFrames ${TIER_GOVERNOR.promoteCeilingFrames} is below the ` +
+        `first promotion threshold ${promoteThresholdFrames(0)}, so no promotion could ever fire`,
+    );
+  }
+  // Climbing a whole tier must be strictly harder than climbing one scale rung, or the
+  // coarse axis fires first and the cheap reversible lever never gets used.
+  if (TIER_GOVERNOR.promoteHeadroomRatio >= DYNAMIC_RESOLUTION.underBudgetRatio) {
+    violations.push(
+      `tier governor: promoteHeadroomRatio ${TIER_GOVERNOR.promoteHeadroomRatio} is not stricter ` +
+        `than DYNAMIC_RESOLUTION.underBudgetRatio ${DYNAMIC_RESOLUTION.underBudgetRatio}`,
+    );
   }
 
   return violations;

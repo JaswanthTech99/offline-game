@@ -46,12 +46,35 @@ export const CLUSTER_IDS: readonly ClusterId[] = Object.freeze([
 const CLUSTERS_CSS = `
 .sp-cluster-root { position: absolute; inset: 0; pointer-events: none; }
 
+/**
+ * THE CORNERS ARE PINNED. THE MIDDLE GIVES. This grid is why.
+ *
+ * --sp-vvh and --sp-vvt come from Overlay, which reads window.visualViewport. The
+ * parent .sp-overlay is position:fixed, so inset:0 sizes it to the LAYOUT viewport;
+ * on Android WebView in immersive fullscreen that box can be taller than what the player
+ * can see, and a bottom-pinned cluster then lands off-screen. Measuring the grid against
+ * the visual viewport instead makes "bottom" mean the bottom of the VISIBLE area. On every
+ * browser where the two boxes agree, --sp-vvh resolves to 100% and this is a no-op. The
+ * scroll offset is applied as a transform, never as top, per the Overlay rule.
+ *
+ * The row track is minmax(0, 1fr), NOT 1fr, and that single word is the fix for the
+ * defect this file shipped: a bare 1fr is minmax(auto, 1fr), so the middle row REFUSES
+ * to shrink below the pickup rail's min-content height. On a 851x393 landscape phone the
+ * rail's 117px floor plus the two 90px/156px corner rows plus 80px of pad summed to 443px
+ * inside a 393px box, the bottom row was pushed 10px past the padding edge, and
+ * .sp-overlay { overflow: hidden } sliced the ball count off mid-glyph. minmax(0, 1fr)
+ * lets the middle collapse so the corner rows can never be evicted. The rail overflows its
+ * own row instead, which is correct: a decorative rack of pickup slots may overlap, the
+ * number that ends the run may not be cut in half.
+ */
 .sp-clusters {
   position: absolute;
-  inset: 0;
+  inset: 0 0 auto 0;
+  height: var(--sp-vvh, 100%);
+  transform: translate3d(0, var(--sp-vvt, 0px), 0);
   display: grid;
-  grid-template-columns: max-content 1fr max-content;
-  grid-template-rows: max-content 1fr max-content;
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr) minmax(0, max-content);
+  grid-template-rows: max-content minmax(0, 1fr) max-content;
   grid-template-areas:
     'tl .  tr'
     '.  .  rail'
@@ -66,11 +89,23 @@ const CLUSTERS_CSS = `
   display: flex;
   flex-direction: column;
   gap: 10px;
+  /* The column analogue of the rail's min-height: 0. A grid ITEM has an automatic
+     minimum size of its content, so a track told it may shrink is overruled without this. */
+  min-width: 0;
   contain: layout style;
 }
 .sp-c--tl   { grid-area: tl;   align-items: flex-start; }
 .sp-c--tr   { grid-area: tr;   align-items: flex-end; text-align: right; }
-.sp-c--rail { grid-area: rail; align-items: flex-end; align-self: center; justify-self: end; }
+/* min-height: 0 is the second half of the minmax(0, 1fr) fix. A grid ITEM also has an
+   automatic minimum size, so without this the rail would re-impose its own content height
+   on a row that has just been told it may collapse. */
+.sp-c--rail {
+  grid-area: rail;
+  align-items: flex-end;
+  align-self: center;
+  justify-self: end;
+  min-height: 0;
+}
 .sp-c--bl   { grid-area: bl;   align-items: flex-start; justify-content: flex-end; }
 .sp-c--br   { grid-area: br;   align-items: flex-end; text-align: right; justify-content: flex-end; }
 

@@ -41,8 +41,19 @@ import { Emitter } from './Events';
 import type { Unsubscribe } from './Events';
 import { Loop } from './Loop';
 import type { LoopStats } from './Loop';
-import type { QualityResolution, Tier } from './Quality';
-import { DYNAMIC_RESOLUTION, FIXED_STEP_MS, RENDER_SCALE_LADDER, deriveRenderScale, resolveTier } from './Quality';
+import type { GovernorState, QualityResolution, Tier } from './Quality';
+import {
+  FIXED_STEP_MS,
+  GOVERNOR_FLOOR_TIER,
+  deriveRenderScale,
+  deviceClassCeiling,
+  governorStep,
+  higherTier,
+  newGovernorState,
+  resolveTier,
+  rungNeighbour,
+  snapRenderScale,
+} from './Quality';
 import type { Frames, Tickable } from './types';
 
 /** What the engine needs in order to draw at all. Supplied by the world layer. */
@@ -90,22 +101,6 @@ export interface EngineEventMap {
 /** Smallest sane backing store. A zero-sized swap chain is a device error, not a small one. */
 const MIN_SURFACE_PX = 1;
 
-function snapToLadder(scale: number, min: number, max: number): number {
-  let best: number | null = null;
-  let bestDistance = Infinity;
-  for (const rung of RENDER_SCALE_LADDER) {
-    if (rung < min || rung > max) continue;
-    const distance = Math.abs(rung - scale);
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      best = rung;
-    }
-  }
-  // A tier window that contains no rung is a Quality.ts bug, but the frame still has to be
-  // drawn: fall back to the raw clamp rather than refusing to size the canvas.
-  return best ?? Math.min(Math.max(scale, min), max);
-}
-
 export class Engine {
   readonly renderer: WebGPURenderer;
   readonly events = new Emitter<EngineEventMap>();
@@ -118,7 +113,23 @@ export class Engine {
 
   private capsValue: EngineCaps;
   private qualityValue: QualityResolution;
+  /** What the PLAYER, the URL or the boot probe asked for. The governor never writes here. */
   private tierOverride: Tier | null;
+  /** What the GOVERNOR currently holds. Null means "whatever the override/detection says". */
+  private governorTier: Tier | null = null;
+  /** The highest tier the governor may climb to. Never raised by the governor itself. */
+  private governorCeilingTier: Tier;
+  private governorState: GovernorState;
+  /**
+   * A BOOT-TIME override pins both axes: `?tier=`, or the packaged build's `sp-tier` meta
+   * tag, is a promise about what will actually be drawn, and every e2e project is named
+   * after the tier it captures at. A governor that quietly walks a "DESKTOP_HIGH@1x" run
+   * down to MOBILE_LOW halfway through a capture makes that project name a lie and every
+   * pixel gate irreproducible. A device that was never pinned - which is every real player,
+   * because a phone has no address bar - gets the full two-axis governor. Calling
+   * `setTierOverride` at runtime unpins: that is a live decision, not a boot promise.
+   */
+  private governorPinned: boolean;
 
   /** What the browser needed patching for. Surfaced so a bug report can include it. */
   compat: CompatReport | null = null;
@@ -129,9 +140,6 @@ export class Engine {
   private rafHandle: number | null = null;
   private renderScaleValue: number;
   private lastClampReport = 0;
-  private frameIndex = 0;
-  private overBudgetFrames = 0;
-  private underBudgetFrames = 0;
   private disposed = false;
 
   /** Guards against re-emitting an identical resize on every ResizeObserver notification. */
@@ -178,13 +186,17 @@ export class Engine {
     const budget0 = this.qualityValue.budget;
     this.renderScaleValue =
       options.scaleOverride !== undefined && options.scaleOverride > 0
-        ? snapToLadder(options.scaleOverride, budget0.renderScaleMin, budget0.renderScaleMax)
+        ? snapRenderScale(options.scaleOverride, budget0.renderScaleMin, budget0.renderScaleMax)
         : deriveRenderScale(
             budget0,
             options.canvas.clientWidth || globalThis.innerWidth,
             options.canvas.clientHeight || globalThis.innerHeight,
             globalThis.devicePixelRatio,
           );
+
+    this.governorCeilingTier = this.ceilingFor(this.tierOverride);
+    this.governorState = newGovernorState(this.qualityValue.graphics, this.renderScaleValue);
+    this.governorPinned = this.tierOverride !== null;
 
     // PCF is the WebGPU-safe filter in r185; PCFSoft is not reliably supported on the
     // backend and silently degrades rather than failing loudly.
@@ -242,6 +254,37 @@ export class Engine {
 
   get running(): boolean {
     return this.rafHandle !== null;
+  }
+
+  /** The governor's whole mind, for the HUD, a bug report, or the governor gate. */
+  get governor(): GovernorState {
+    return this.governorState;
+  }
+
+  /** The highest tier the governor may promote to. See the constructor for who sets it. */
+  get governorCeiling(): Tier {
+    return this.governorCeilingTier;
+  }
+
+  /** False while a boot-time tier override pins both quality axes. See `governorPinned`. */
+  get governorActive(): boolean {
+    return !this.governorPinned;
+  }
+
+  /**
+   * The highest tier the governor is ever allowed to reach, given what was last asked of it.
+   *
+   * The device class is a FLOOR on this ceiling, not a cap on it. main.ts's boot probe is
+   * already bounded by its own `ceilingFor`, so a verdict that came back BELOW the class
+   * ceiling is a measurement of a phone at that moment - very often a phone still warm from
+   * decompressing the APK - and not a permanent verdict about the hardware. Treating it as
+   * a cap would mean one unlucky second at boot locks a flagship out of its own tier for
+   * the rest of the session. Anything asked for ABOVE the class ceiling is taken at face
+   * value, because only a human or a URL can ask for that and both outrank a heuristic.
+   */
+  private ceilingFor(tier: Tier | null): Tier {
+    const deviceClass = deviceClassCeiling(this.capsValue);
+    return tier === null ? deviceClass : higherTier(tier, deviceClass);
   }
 
   /**
@@ -304,9 +347,16 @@ export class Engine {
    * purpose: an override is a preference and may not overrule an accessibility setting.
    */
   setTierOverride(tier: Tier | null): void {
-    if (tier === this.tierOverride) return;
+    if (tier === this.tierOverride && this.governorTier === null) return;
     this.tierOverride = tier;
+    // Somebody has overruled the governor. Its accumulated demotion count was evidence about
+    // a tier that is no longer the tier we are on, so it is discarded rather than carried.
+    this.governorTier = null;
     this.applyQuality(resolveTier(this.capsValue, tier), true);
+    this.governorCeilingTier = this.ceilingFor(tier);
+    this.governorState = newGovernorState(this.qualityValue.graphics, this.renderScaleValue);
+    // A runtime choice is not a boot promise: the governor resumes from here.
+    this.governorPinned = false;
   }
 
   /**
@@ -316,7 +366,7 @@ export class Engine {
    */
   setRenderScale(scale: number): boolean {
     const budget = this.qualityValue.budget;
-    const snapped = snapToLadder(scale, budget.renderScaleMin, budget.renderScaleMax);
+    const snapped = snapRenderScale(scale, budget.renderScaleMin, budget.renderScaleMax);
     if (snapped === this.renderScaleValue) return false;
     this.renderScaleValue = snapped;
     this.applySize();
@@ -327,11 +377,13 @@ export class Engine {
   stepRenderScale(direction: number): boolean {
     if (direction === 0) return false;
     const budget = this.qualityValue.budget;
-    const next = this.ladderIndex() + (direction > 0 ? 1 : -1);
-    const rung = RENDER_SCALE_LADDER[next];
-    if (rung === undefined || rung < budget.renderScaleMin || rung > budget.renderScaleMax) {
-      return false;
-    }
+    const rung = rungNeighbour(
+      this.renderScaleValue,
+      direction > 0 ? 1 : -1,
+      budget.renderScaleMin,
+      budget.renderScaleMax,
+    );
+    if (rung === null) return false;
     return this.setRenderScale(rung);
   }
 
@@ -366,7 +418,10 @@ export class Engine {
 
     const stats = this.loop.advance(nowMs);
     this.renderFrame();
-    this.governResolution(stats.frameMs);
+    // SMOOTHED, not raw: a single 200ms hitch - a GC, a texture upload, the OS taking the
+    // frame back - is not evidence about a tier, and Loop already publishes the EMA that
+    // says so. The governor's counters supply the sustain; this supplies the stability.
+    this.governResolution(stats.smoothedFrameMs);
     this.events.emit('engine:frame', stats);
   };
 
@@ -376,45 +431,63 @@ export class Engine {
   }
 
   /**
-   * Dynamic resolution. Render scale is DERIVED from a pixel budget, which is a statement
-   * about what the tier would like to afford - not about what this machine can deliver.
-   * Without this loop a weak host renders at 2x supersampling and stutters, which is
-   * exactly what shipping the derivation alone produced.
+   * TWO-AXIS DYNAMIC QUALITY. Render scale is DERIVED from a pixel budget, which is a
+   * statement about what the tier would LIKE to afford - not about what this machine can
+   * deliver. Without a feedback loop a weak host renders at 2x supersampling and stutters,
+   * which is exactly what shipping the derivation alone produced.
+   *
+   * One axis was not enough. A OnePlus 12 on MOBILE_ULTRA rode the scale ladder down to
+   * that tier's 0.8 floor, ran out of rungs, and then held a 33ms frame against a 16.6ms
+   * budget for the rest of the session with no move left to make - because the cost was
+   * never resolution, it was rings, post stages, lights and shards, all of which are TIER
+   * rows. So the coarse axis demotes the tier itself once the fine axis is spent.
+   *
+   * The POLICY lives in Quality.ts as a pure reducer; this method is only the actuator, and
+   * it hands the reducer back the state it actually achieved rather than the one it asked
+   * for - `snapRenderScale` and the tier tables have the last word on both axes.
    */
   private governResolution(frameMs: number): void {
-    this.frameIndex += 1;
-    if (this.frameIndex < DYNAMIC_RESOLUTION.warmupFrames) return;
+    if (this.governorPinned) return;
 
-    const target = 1000 / this.qualityValue.budget.targetFps;
-    if (frameMs > target * DYNAMIC_RESOLUTION.overBudgetRatio) {
-      this.overBudgetFrames += 1;
-      this.underBudgetFrames = 0;
-    } else if (frameMs < target * DYNAMIC_RESOLUTION.underBudgetRatio) {
-      this.underBudgetFrames += 1;
-      this.overBudgetFrames = 0;
-    } else {
-      this.overBudgetFrames = 0;
-      this.underBudgetFrames = 0;
+    const step = governorStep(this.governorState, frameMs, {
+      ceiling: this.governorCeilingTier,
+      floor: GOVERNOR_FLOOR_TIER,
+    });
+
+    const action = step.action;
+    if (action.kind === 'scale') {
+      if (this.setRenderScale(action.to)) this.events.emit('engine:quality', this.qualityValue);
+    } else if (action.kind === 'tier') {
+      this.governorTier = action.to;
+      // resetScale: the new tier's default, not the scale we were losing at. applyQuality
+      // emits engine:quality and re-sizes, so nothing else is needed here.
+      this.applyQuality(resolveTier(this.capsValue, action.to), true);
+      console.info(
+        `[shatterpoint] governor ${action.direction < 0 ? 'demoted' : 'promoted'}: ` +
+          `${action.to} at scale ` +
+          `${this.renderScaleValue.toFixed(2)} (frame ${frameMs.toFixed(1)}ms, ` +
+          `${step.state.demotions} demotion(s) this session)`,
+      );
     }
 
-    if (this.overBudgetFrames >= DYNAMIC_RESOLUTION.dropAfterFrames) {
-      this.overBudgetFrames = 0;
-      this.stepScale(-1);
-    } else if (this.underBudgetFrames >= DYNAMIC_RESOLUTION.raiseAfterFrames) {
-      this.underBudgetFrames = 0;
-      this.stepScale(1);
-    }
+    this.governorState = {
+      ...step.state,
+      tier: this.qualityValue.graphics,
+      renderScale: this.renderScaleValue,
+    };
   }
 
-  /** Moves one rung along the ladder, within the tier's window. */
-  private stepScale(direction: number): void {
-    const rungs = RENDER_SCALE_LADDER;
-    const here = rungs.indexOf(this.renderScaleValue);
-    const next = rungs[here + direction];
-    if (here < 0 || next === undefined) return;
-    if (this.setRenderScale(next)) {
-      this.events.emit('engine:quality', this.qualityValue);
-    }
+  /**
+   * TEST SEAM. Feeds synthetic frame times straight into the governor, bypassing the clock
+   * and the renderer entirely.
+   *
+   * It exists because the alternative is a gate that waits for a real device to get hot,
+   * which is neither deterministic nor runnable in CI. Call `stop()` first: rAF keeps
+   * feeding the governor real frame times otherwise, and the two would interleave. Shipped
+   * rather than dev-gated because a bug report from a real phone wants the same lever.
+   */
+  feedGovernorFrames(frameMs: number, count: number): void {
+    for (let i = 0; i < count; i += 1) this.governResolution(frameMs);
   }
 
   private renderFrame(): void {
@@ -441,7 +514,9 @@ export class Engine {
   private onReducedMotionChange(reduced: boolean): void {
     if (reduced === this.capsValue.prefersReducedMotion) return;
     this.capsValue = { ...this.capsValue, prefersReducedMotion: reduced };
-    this.applyQuality(resolveTier(this.capsValue, this.tierOverride), false);
+    // The governor's tier outranks the override here: it was chosen from measured frames,
+    // and a motion-preference change is not evidence that the device got faster.
+    this.applyQuality(resolveTier(this.capsValue, this.governorTier ?? this.tierOverride), false);
   }
 
   /**
@@ -454,25 +529,10 @@ export class Engine {
 
     const budget = next.budget;
     const wanted = resetScale ? budget.renderScale : this.renderScaleValue;
-    this.renderScaleValue = snapToLadder(wanted, budget.renderScaleMin, budget.renderScaleMax);
+    this.renderScaleValue = snapRenderScale(wanted, budget.renderScaleMin, budget.renderScaleMax);
 
     this.events.emit('engine:quality', next);
     this.applySize();
-  }
-
-  private ladderIndex(): number {
-    let index = 0;
-    let bestDistance = Infinity;
-    for (let i = 0; i < RENDER_SCALE_LADDER.length; i += 1) {
-      const rung = RENDER_SCALE_LADDER[i];
-      if (rung === undefined) continue;
-      const distance = Math.abs(rung - this.renderScaleValue);
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        index = i;
-      }
-    }
-    return index;
   }
 
   private applySize(): void {
@@ -520,12 +580,24 @@ export class Engine {
       drawingHeight: Math.floor(cssHeight * pixelRatio),
     };
 
+    /**
+     * `renderScale` is part of the comparison, and leaving it out was a real bug.
+     *
+     * Because of the split ownership above, a scale change at or below 1.0 moves NOTHING
+     * the Engine itself sizes - the pixel ratio stays exactly 1 and the CSS box never
+     * moves - so a guard that compared only those three fields swallowed the event. The
+     * post chain learns the sub-1.0 factor from `engine:resize` and from nowhere else, so
+     * every drop the governor made from 1.0 downwards was applied to a number in this
+     * class and to nothing on the GPU. The frame never got cheaper, which is why the phone
+     * kept posting 33ms while the ladder walked all the way to its floor.
+     */
     const previous = this.lastResize;
     if (
       previous !== null &&
       previous.cssWidth === info.cssWidth &&
       previous.cssHeight === info.cssHeight &&
-      previous.pixelRatio === info.pixelRatio
+      previous.pixelRatio === info.pixelRatio &&
+      previous.renderScale === info.renderScale
     ) {
       return;
     }

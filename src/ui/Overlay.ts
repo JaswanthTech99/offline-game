@@ -48,11 +48,31 @@ export const OVERLAY_TOKENS = Object.freeze({
   phoneMaxPx: 640,
   /** Viewport width at or below which tablet padding applies. */
   tabletMaxPx: 1024,
+  /**
+   * Viewport HEIGHT at or below which phone padding applies regardless of width.
+   *
+   * This is not symmetry for its own sake. A OnePlus 12 in landscape is 851x393 CSS px:
+   * classified on width alone it lands in `tablet`, so it was handed 40px gutters and an
+   * 84px ball numeral inside 393px of height. Row one (90px) plus the pickup rail (117px)
+   * plus the bottom row (156px) plus 80px of vertical pad is 443px of content in a 393px
+   * box, and .sp-overlay { overflow: hidden } sliced the bottom row off mid-glyph. A
+   * phone held sideways is still a phone; only its short axis says so.
+   *
+   * 480 is chosen to sit above every phone landscape height and below every laptop: the
+   * shortest mainstream desktop viewport is 720px tall and small tablets landscape at 600.
+   */
+  shortMaxPx: 480,
 });
 
-/** Pure so the padding tier can be asserted in a test without a layout engine. */
-export function classifySize(widthPx: number): OverlaySize {
+/**
+ * Pure so the padding tier can be asserted in a test without a layout engine.
+ *
+ * Width picks the tier and height can only DEMOTE it. Taking `min(w, h)` instead would
+ * classify a 1280x720 desktop as a tablet, which is why the two axes are not symmetric.
+ */
+export function classifySize(widthPx: number, heightPx: number): OverlaySize {
   if (widthPx <= OVERLAY_TOKENS.phoneMaxPx) return 'phone';
+  if (heightPx <= OVERLAY_TOKENS.shortMaxPx) return 'phone';
   if (widthPx <= OVERLAY_TOKENS.tabletMaxPx) return 'tablet';
   return 'desktop';
 }
@@ -178,11 +198,24 @@ const OVERLAY_CSS = `
   --sp-ui-transition: 200ms;
   --sp-hud-pulse: 1;
 
+  /* THE VISUAL VIEWPORT HEIGHT, stamped by frame() from window.visualViewport.
+     .sp-overlay is position:fixed, so inset:0 sizes it to the LAYOUT viewport. On
+     Android WebView in immersive fullscreen the two are not always the same box, and a
+     cluster pinned to the bottom of the layout viewport then sits below the visible area
+     with no way to tell from inside CSS. The clusters grid measures itself against this
+     instead. 100% is the correct fallback: every desktop browser and every case where the
+     two viewports agree resolves it to exactly the layout height. */
+  --sp-vvh: 100%;
+  --sp-vvt: 0px;
+
   /* Desktop pads are the base so the first paint - before ResizeObserver has reported and
      frame() has stamped data-size - is already laid out rather than flush to the bezel. */
   /* --sp-edge is the curved-display margin, written by main.ts from Quality.ts. It is
      separate from the safe-area inset on purpose: a curve occludes nothing, so Android
-     reports no inset for it, and only the left and right edges are affected. */
+     reports no inset for it, and only the left and right edges are affected.
+     IT MUST BE REPEATED IN EVERY data-size BLOCK BELOW. Those blocks re-declare --sp-pad-l
+     and --sp-pad-r outright, so a block that omits the --sp-edge term silently deletes the
+     curved-display margin the moment ResizeObserver stamps data-size - which is always. */
   --sp-pad-l: calc(64px + var(--sp-safe-l) + var(--sp-edge, 0px));
   --sp-pad-r: calc(64px + var(--sp-safe-r) + var(--sp-edge, 0px));
   --sp-pad-t: calc(64px + var(--sp-safe-t));
@@ -206,20 +239,20 @@ const OVERLAY_CSS = `
 }
 
 .sp-overlay[data-size='desktop'] {
-  --sp-pad-l: calc(64px + var(--sp-safe-l));
-  --sp-pad-r: calc(64px + var(--sp-safe-r));
+  --sp-pad-l: calc(64px + var(--sp-safe-l) + var(--sp-edge, 0px));
+  --sp-pad-r: calc(64px + var(--sp-safe-r) + var(--sp-edge, 0px));
   --sp-pad-t: calc(64px + var(--sp-safe-t));
   --sp-pad-b: calc(64px + var(--sp-safe-b));
 }
 .sp-overlay[data-size='tablet'] {
-  --sp-pad-l: calc(40px + var(--sp-safe-l));
-  --sp-pad-r: calc(40px + var(--sp-safe-r));
+  --sp-pad-l: calc(40px + var(--sp-safe-l) + var(--sp-edge, 0px));
+  --sp-pad-r: calc(40px + var(--sp-safe-r) + var(--sp-edge, 0px));
   --sp-pad-t: calc(40px + var(--sp-safe-t));
   --sp-pad-b: calc(40px + var(--sp-safe-b));
 }
 .sp-overlay[data-size='phone'] {
-  --sp-pad-l: calc(16px + var(--sp-safe-l));
-  --sp-pad-r: calc(16px + var(--sp-safe-r));
+  --sp-pad-l: calc(16px + var(--sp-safe-l) + var(--sp-edge, 0px));
+  --sp-pad-r: calc(16px + var(--sp-safe-r) + var(--sp-edge, 0px));
   --sp-pad-t: calc(16px + var(--sp-safe-t));
   --sp-pad-b: calc(16px + var(--sp-safe-b));
 }
@@ -255,10 +288,19 @@ export class Overlay implements Tickable, Disposable {
   private readonly children: Tickable[] = [];
   private readonly observer: ResizeObserver | null;
   private readonly onWindowResize: (() => void) | null;
+  private readonly viewport: VisualViewport | null;
+  private readonly onViewportChange: (() => void) | null;
 
   private size: OverlaySize = 'desktop';
   private pendingSize: OverlaySize = 'desktop';
   private sizeDirty = true;
+
+  // The last visual-viewport box written to CSS, and the one waiting to be. NaN is the
+  // "never written" sentinel so the first frame always stamps.
+  private vvHeight = Number.NaN;
+  private vvTop = Number.NaN;
+  private pendingVvHeight = Number.NaN;
+  private pendingVvTop = Number.NaN;
 
   constructor(host: HTMLElement, motion: MotionRules) {
     addStyleOnce('sp-overlay', OVERLAY_CSS);
@@ -291,7 +333,7 @@ export class Overlay implements Tickable, Disposable {
       this.observer = new ResizeObserver((entries) => {
         const entry = entries[0];
         if (entry === undefined) return;
-        this.queueSize(classifySize(entry.contentRect.width));
+        this.queueSize(classifySize(entry.contentRect.width, entry.contentRect.height));
       });
       // observe() delivers an initial observation on its own, so nothing here has to read
       // clientWidth and force the layout the whole class is built to avoid.
@@ -299,9 +341,31 @@ export class Overlay implements Tickable, Disposable {
       this.onWindowResize = null;
     } else {
       this.observer = null;
-      this.onWindowResize = (): void => this.queueSize(classifySize(window.innerWidth));
+      this.onWindowResize = (): void =>
+        this.queueSize(classifySize(window.innerWidth, window.innerHeight));
       window.addEventListener('resize', this.onWindowResize, { passive: true });
       this.onWindowResize();
+    }
+
+    // The visual viewport is a SEPARATE box from the one ResizeObserver reports, and it is
+    // the only one that describes what the player can actually see. It moves without any
+    // element resizing - browser chrome collapsing, an Android WebView entering immersive
+    // mode, a soft keyboard - so it needs its own subscription. `scroll` matters as much as
+    // `resize`: offsetTop is how far the visible box has slid down the layout viewport.
+    // Both handlers only record; frame() does the writing, per the class contract.
+    const vv: VisualViewport | undefined = window.visualViewport ?? undefined;
+    if (vv !== undefined) {
+      this.viewport = vv;
+      this.onViewportChange = (): void => {
+        this.pendingVvHeight = vv.height;
+        this.pendingVvTop = vv.offsetTop;
+      };
+      vv.addEventListener('resize', this.onViewportChange, { passive: true });
+      vv.addEventListener('scroll', this.onViewportChange, { passive: true });
+      this.onViewportChange();
+    } else {
+      this.viewport = null;
+      this.onViewportChange = null;
     }
   }
 
@@ -358,12 +422,28 @@ export class Overlay implements Tickable, Disposable {
       this.size = this.pendingSize;
       setAttr(this.root, 'data-size', this.size);
     }
+    // Sub-pixel churn here would invalidate style on the whole overlay for nothing, so the
+    // box is compared at whole pixels before it is written.
+    const height = Math.round(this.pendingVvHeight);
+    const top = Math.round(this.pendingVvTop);
+    if (height !== this.vvHeight || top !== this.vvTop) {
+      this.vvHeight = height;
+      this.vvTop = top;
+      if (Number.isFinite(height) && Number.isFinite(top)) {
+        this.root.style.setProperty('--sp-vvh', `${String(height)}px`);
+        this.root.style.setProperty('--sp-vvt', `${String(top)}px`);
+      }
+    }
     for (const child of this.children) child.frame(alpha);
   }
 
   dispose(): void {
     this.observer?.disconnect();
     if (this.onWindowResize !== null) window.removeEventListener('resize', this.onWindowResize);
+    if (this.viewport !== null && this.onViewportChange !== null) {
+      this.viewport.removeEventListener('resize', this.onViewportChange);
+      this.viewport.removeEventListener('scroll', this.onViewportChange);
+    }
     for (const child of this.children) {
       if (isDisposable(child)) child.dispose();
     }

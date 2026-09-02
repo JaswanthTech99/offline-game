@@ -194,7 +194,7 @@ const HUD_CSS = `
    a pickup expiring mid-corridor cannot reflow the panel, the cluster and the grid on a
    frame the player is mid-throw. The whole rack fades out when nothing is active, which
    is the only state change worth paying a layout for - and it pays none. */
-.sp-pickups { width: 184px; display: flex; flex-direction: column; gap: 8px; opacity: 1; transition: opacity var(--sp-ui-transition) linear; }
+.sp-pickups { width: 184px; max-width: 100%; display: flex; flex-direction: column; gap: 8px; opacity: 1; transition: opacity var(--sp-ui-transition) linear; }
 .sp-pickups[data-on='false'] { opacity: 0; visibility: hidden; }
 .sp-pickup-list { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .sp-chip {
