@@ -11,6 +11,10 @@
  *   -> vignette -> film grain                 framing and texture, still scene-referred
  *   -> split tone -> tone map -> LUT          the grade, straddling the tone map on purpose
  *
+ * Bloom is the one stage that does not read the stage before it. It reads the scene pass's
+ * `emissive` MRT attachment, because glow belongs to things that EMIT and not to things
+ * that happen to be bright. See the bloom stage for what a threshold over the beauty costs.
+ *
  * Every stage is gated by Quality.ts. Nothing here invents a number: `budget.postIntensity`
  * is the only source of magnitudes, and `resolvePostChain` is the only source of on/off.
  *
@@ -30,9 +34,10 @@ import type {
   Scene,
   UniformNode,
 } from 'three/webgpu';
-import { Color, RenderPipeline } from 'three/webgpu';
+import { AdditiveBlending, BlendMode, Color, RenderPipeline } from 'three/webgpu';
 import {
   convertToTexture,
+  emissive,
   float,
   int,
   mix,
@@ -165,11 +170,27 @@ export class PostChain {
     // actually read. MOBILE_LOW ends up with a plain colour target and no G-buffer at all.
     const wantsNormal = post.gtao || post.ssr;
     const wantsVelocity = temporal || post.motionBlur;
-    if (wantsNormal || wantsVelocity) {
+    // Bloom is EMISSIVE-ONLY, so the mask it reads is an attachment rather than a threshold
+    // over the beauty. `emissive` is the lighting stack's EmissiveColor property, which
+    // NodeMaterial assigns from each material's emissiveNode - so a surface glows in the
+    // mask exactly when it emits, and a material that wants to be brighter in the mask than
+    // it is in the frame overrides the attachment through its own `mrtNode`.
+    const wantsEmissive = post.bloom;
+    if (wantsNormal || wantsVelocity || wantsEmissive) {
       const attachments: Record<string, Node> = { output };
       if (wantsNormal) attachments['normal'] = normalView;
       if (wantsVelocity) attachments['velocity'] = velocity;
-      this.scenePass.setMRT(mrt(attachments));
+      if (wantsEmissive) attachments['emissive'] = emissive;
+      const targets = mrt(attachments);
+      if (wantsEmissive) {
+        // Light ADDS. Under the default no-blend write, any surface drawn in front of an
+        // emitter stamps its own zero into the mask and punches the glowing thing straight
+        // out of it - a crystal's halo erasing the crystal, a pane erasing what is behind
+        // it. (The WebGL fallback needs OES_draw_buffers_indexed for per-attachment blend
+        // and warns once when it has to fall back to the material's own blending.)
+        targets.setBlendMode('emissive', new BlendMode(AdditiveBlending));
+      }
+      this.scenePass.setMRT(targets);
     }
 
     const colorTexture = this.scenePass.getTextureNode('output');
@@ -253,9 +274,25 @@ export class PostChain {
 
     // ---- Bloom -------------------------------------------------------------------------
     if (post.bloom) {
-      const bloomPass = bloom(node, intensity.bloomStrength, intensity.bloomRadius, intensity.bloomThreshold);
+      // EMISSIVE-ONLY, from the MRT mask - not from a luminance threshold over the beauty.
+      // Thresholding the finished frame blooms whatever happens to be bright: a lit floor
+      // plate, fog at the vanishing point, a pane catching the key. That is how a crystal
+      // ends up BRIGHT BUT NOT GLOWING - it never wins the threshold against the corridor
+      // around it - and it is why the histogram went milky the first time. What emits,
+      // blooms. What is merely lit, does not.
+      //
+      // Threshold is 0 rather than `intensity.bloomThreshold`: the mask IS the selection,
+      // and asking a second luminance question of it only ever subtracts emitters, the
+      // faintest first - which is the distant crystal, the one that most needs finding.
+      // `bloomThreshold` is left in PostIntensity for a chain that reads the beauty.
+      const bloomPass = bloom(
+        this.scenePass.getTextureNode('emissive'),
+        intensity.bloomStrength,
+        intensity.bloomRadius,
+        0,
+      );
       node = vec4(node.rgb.add(bloomPass.rgb), node.a);
-      this.note('bloom', true, 'additive');
+      this.note('bloom', true, 'emissive MRT mask, additive');
     } else {
       this.note('bloom', false, 'disabled by tier');
     }

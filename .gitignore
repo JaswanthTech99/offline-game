@@ -1,6 +1,15 @@
 node_modules/
 dist/
 dev-dist/
+
+# playwright output: traces, videos, HTML report, and rendered exports. Artifacts of a
+# test run, not source - and a single failed 4x run writes hundreds of JPEG frames.
+test-results/
+e2e-report/
+playwright-report/
+exports/
+blob-report/
+.playwright/
 .attic/
 *.log
 

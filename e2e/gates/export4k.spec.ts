@@ -85,6 +85,55 @@ const forceRenderScale = (page: Page, scale: number): Promise<boolean> =>
     return app?.engine.setRenderScale(s) ?? false;
   }, scale);
 
+/**
+ * The histogram is the only thing this path reports, so it is checked against an image
+ * whose answers are arithmetic rather than opinion. Grey pixels are used throughout: the
+ * Rec.709 coefficients sum to 1, so a neutral byte v has luma exactly v/255 and every
+ * expected value below can be derived by hand. Costs microseconds and requires no browser.
+ */
+test.describe('@export4k-selfcheck', () => {
+  test.beforeEach(({}) => {
+    test.skip(!exportRequested(), 'runs with the export it validates');
+  });
+
+  test('lumaStats reports what a known image contains', () => {
+    const W = 100;
+    const H = 100;
+    const png = new PNG({ width: W, height: H });
+    const put = (x: number, y: number, v: number): void => {
+      const i = (y * W + x) * 4;
+      png.data[i] = v;
+      png.data[i + 1] = v;
+      png.data[i + 2] = v;
+      png.data[i + 3] = 255;
+    };
+
+    const BG = 64; // luma 0.250980
+    const MID = 90; // luma 0.352941 - inside the 28-45% band
+    const HOT = 255; // luma 1 - above the 80% threshold
+    for (let y = 0; y < H; y += 1) for (let x = 0; x < W; x += 1) put(x, y, BG);
+    // 10x10 hot block and 20x20 mid block, both well clear of the 6px edge band and the
+    // 8x8 corner boxes, so the edge and corner numbers must stay at the background.
+    for (let y = 40; y < 50; y += 1) for (let x = 40; x < 50; x += 1) put(x, y, HOT);
+    for (let y = 60; y < 80; y += 1) for (let x = 20; x < 40; x += 1) put(x, y, MID);
+
+    const s = lumaStats(png);
+    expect(s.width).toBe(W);
+    expect(s.height).toBe(H);
+    expect(s.pixels).toBe(W * H);
+    expect(s.min).toBeCloseTo(BG / 255, 6);
+    expect(s.max).toBeCloseTo(1, 6);
+    // Bin centre, not the exact luma: the median comes out of a 1024-bin histogram.
+    expect(s.median).toBeCloseTo(BG / 255, 2);
+    expect(s.edgeBandMean).toBeCloseTo(BG / 255, 6);
+    expect(s.cornerMax).toBeCloseTo(BG / 255, 6);
+    expect(s.pctOver80).toBeCloseTo((100 / (W * H)) * 100, 6);
+    expect(s.pctIn28to45).toBeCloseTo((400 / (W * H)) * 100, 6);
+    expect(s.edgeBandPx).toBe(6);
+    expect(s.cornerBoxPx).toEqual({ w: 8, h: 8 });
+  });
+});
+
 test.describe('@export4k', () => {
   test.beforeEach(({}, info) => {
     test.skip(
@@ -147,8 +196,14 @@ test.describe('@export4k', () => {
       .poll(() => framesPresented(page), { timeout: SETTLE_TIMEOUT_MS })
       .toBeGreaterThanOrEqual(before + SETTLE_FRAMES);
 
-    const shot = await page.screenshot({ scale: 'device' });
+    // Read the state that drew the frame BEFORE capturing it, not after: a 4K encode takes
+    // seconds, and a governor drop landing inside that window would condemn a still that was
+    // in fact rendered correctly.
     const after = await game.snapshot();
+    expect(after.renderScale, 'the governor moved the render scale before the capture').toBe(
+      EXPORT_RENDER_SCALE,
+    );
+    const shot = await page.screenshot({ scale: 'device' });
 
     await mkdir(EXPORT_DIR, { recursive: true });
     const file = join(EXPORT_DIR, `shatterpoint-${game.tier}-4k.png`);
@@ -161,9 +216,6 @@ test.describe('@export4k', () => {
 
     // The still must be a downsample of a larger render, never an upscale of a smaller one.
     const supersample = after.bufferWidth / png.width;
-    expect(after.renderScale, 'the governor moved the render scale during the capture').toBe(
-      EXPORT_RENDER_SCALE,
-    );
     expect(supersample, 'the 4K still was upscaled, not rendered').toBeGreaterThanOrEqual(1);
 
     const stats = lumaStats(png);
