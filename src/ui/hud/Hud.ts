@@ -489,20 +489,36 @@ class PickupRail {
 }
 
 /** One telemetry line: name, value, and a scaleX meter against a Quality.ts ceiling. */
+/**
+ * Which way is bad. Most rows are ceilings - frame time, draw calls, live shards - where
+ * exceeding the number is the failure. FPS is the opposite, and treating it as a ceiling is
+ * why the HUD painted "59 / 30" red while the renderer was beating its target by double. A
+ * telemetry readout that lies about pass/fail is worse than none, because it is believed.
+ */
+type TelemetryDirection = 'ceiling' | 'floor';
+
 class TelemetryRow {
   private readonly root: HTMLElement;
   private readonly value: HTMLElement;
   private readonly fill: NumVar;
   private readonly track: HTMLElement;
   private readonly ceiling: number;
+  private readonly direction: TelemetryDirection;
   private readonly decimals: number;
   private readonly ceilingText: string;
 
   private last = Number.NaN;
   private over = false;
 
-  constructor(parent: HTMLElement, name: string, ceiling: number, decimals: number) {
+  constructor(
+    parent: HTMLElement,
+    name: string,
+    ceiling: number,
+    decimals: number,
+    direction: TelemetryDirection = 'ceiling',
+  ) {
     this.ceiling = ceiling;
+    this.direction = direction;
     this.decimals = decimals;
     this.ceilingText = ceiling.toFixed(decimals);
 
@@ -521,7 +537,9 @@ class TelemetryRow {
       this.last = value;
       setText(this.value, `${value.toFixed(this.decimals)} / ${this.ceilingText}`);
     }
-    const over = value > this.ceiling;
+    // A floor row fills as it APPROACHES the target and fails below it; a ceiling row
+    // fills as it approaches the limit and fails above it.
+    const over = this.direction === 'floor' ? value < this.ceiling : value > this.ceiling;
     if (over !== this.over) {
       this.over = over;
       const flag = over ? 'true' : 'false';
@@ -536,6 +554,9 @@ class TelemetryRow {
  * a telemetry readout measuring against a number the engine does not actually use is
  * worse than no telemetry, because it is believed.
  */
+/** Native resolution. The scale row reports against this, not against the ladder ceiling. */
+const SCALE_TARGET = 1.0;
+
 class TelemetryCluster {
   private readonly fps: TelemetryRow;
   private readonly frame: TelemetryRow;
@@ -552,12 +573,15 @@ class TelemetryCluster {
     tier.textContent = quality.reducedMotion ? `${quality.graphics} · reduced motion` : quality.graphics;
 
     const tel = el('div', 'sp-tel', parent);
-    this.fps = new TelemetryRow(tel, 'fps', budget.targetFps, 0);
+    this.fps = new TelemetryRow(tel, 'fps', budget.targetFps, 0, 'floor');
     this.frame = new TelemetryRow(tel, 'frame', budget.msBudget.frame, 1);
     this.ui = new TelemetryRow(tel, 'ui', budget.msBudget.ui, 2);
     this.draw = new TelemetryRow(tel, 'draw', budget.drawCallCeiling, 0);
     this.shards = new TelemetryRow(tel, 'shards', budget.maxShardsLive, 0);
-    this.scale = new TelemetryRow(tel, 'scale', budget.renderScaleMax, 2);
+    // The ladder max is 2.0 on every tier so the governor can supersample when it earns it,
+    // but showing "0.67 / 2.00" invites the reading that the renderer is failing by 3x. The
+    // row measures against NATIVE, which is what the scale is actually trying to reach.
+    this.scale = new TelemetryRow(tel, 'scale', SCALE_TARGET, 2, 'floor');
 
     el('div', 'sp-rule', parent);
 
