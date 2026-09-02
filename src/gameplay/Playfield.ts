@@ -34,6 +34,7 @@ import {
   Vector3,
 } from 'three/webgpu';
 
+import type { CorridorDims } from '../core/DebugBridge';
 import type { Millis, Seed, Tickable, Disposable } from '../core/types';
 import type { UniverseTheme } from '../universe/UniverseTheme';
 import {
@@ -76,6 +77,38 @@ import type { RowPlan } from './Balance';
  */
 /** Lights on this layer illuminate crystals and nothing else. */
 const CRYSTAL_LAYER = 2;
+
+/**
+ * THE CORRIDOR LIGHT RIG.
+ *
+ * These four colours were inline literals inside the constructor, and one of them said
+ * "cool bounce off the floor plates" in its comment while carrying rgb(1.0, 0.86, 0.68) -
+ * a 3200K tungsten amber. That is what turned the walls beige and the floor pool orange on
+ * device, and a comment disagreeing with its own code is exactly the defect a named block
+ * makes hard to reintroduce.
+ *
+ * The law the architecture follows is that surfaces are near-neutral and every hue is
+ * evidence of a LIGHT. That does not forbid a warm bounce - two-temperature lighting is
+ * what stops a grey corridor reading as dead - but it caps its amplitude, because a bounce
+ * strong enough to tint the walls has stopped being light and become paint.
+ *
+ * Lives here rather than in the universe theme because the rig is the CORRIDOR's, shared by
+ * every universe, in the same way ui/hud/BallCount.ts keeps its spring rates local. If a
+ * universe ever needs its own rig, this is the block that moves.
+ */
+const LIGHT_RIG = Object.freeze({
+  /** Key, from the aperture. Cool, and the brightest thing that is not an emitter. */
+  key: Object.freeze([0.82, 0.89, 1.0] as const),
+  /** Warm bounce off the floor plates. Low amplitude on purpose - see above. */
+  bounce: Object.freeze([1.0, 0.95, 0.89] as const),
+  /** Ambient fill. Cool, so shadow sides stay readable without lifting the black point. */
+  fill: Object.freeze([0.8, 0.86, 0.96] as const),
+  /** The crystal's dedicated key is white: the facets carry the hue, the light must not. */
+  crystalKey: Object.freeze([1, 1, 1] as const),
+});
+
+/** Builds a Color from a rig entry. */
+const rigColour = (c: readonly [number, number, number]): Color => new Color(c[0], c[1], c[2]);
 
 const TUNING = Object.freeze({
   corridorHalfWidth: 5,
@@ -160,7 +193,11 @@ export class Playfield implements Tickable, Disposable {
   private readonly camera: PerspectiveCamera;
   private readonly theme: UniverseTheme;
   private readonly events: PlayfieldEvents;
-  private readonly rng: Rng;
+  // NOT readonly: restart() re-creates it from the same seed. A restart that keeps the
+  // advanced RNG stream is not a restart - it produces a different corridor every time,
+  // which is both wrong for a player replaying a seed and the reason three gates measuring
+  // "identical" frames disagreed with each other by more than their own budgets.
+  private rng: Rng;
 
   private readonly balls: Ball[] = [];
   private readonly targets: Target[] = [];
@@ -424,7 +461,7 @@ export class Playfield implements Tickable, Disposable {
     // FOUR light contributions, not one blob.
     // 1. Key, from the aperture. Hard-clamped: an unbounded point light at the vanishing
     //    point is what clipped the old frame to white across a third of the image.
-    this.keyLight = new PointLight(new Color(0.72, 0.84, 1.0), 13, 48, 2.0);
+    this.keyLight = new PointLight(rigColour(LIGHT_RIG.key), 13, 48, 2.0);
     this.keyLight.position.set(0, 0.8, -22);
     this.root.add(this.keyLight);
 
@@ -435,13 +472,14 @@ export class Playfield implements Tickable, Disposable {
     // blew a decorative pane at 10m to 100% luma, which broke the target/scenery read that
     // the whole legibility pass exists to protect. A light that only one kind of object can
     // see is the correct tool here, not a dimmer light.
-    const crystalKey = new PointLight(new Color(1, 1, 1), 26, 70, 1.2);
+    const crystalKey = new PointLight(rigColour(LIGHT_RIG.crystalKey), 26, 70, 1.2);
     crystalKey.position.set(3.2, 2.4, 2);
     crystalKey.layers.set(CRYSTAL_LAYER);
     this.root.add(crystalKey);
 
-    // 2. Cool bounce off the floor plates, upward onto the underside of everything.
-    this.bounceLight = new PointLight(new Color(1.0, 0.86, 0.68), 9, 34, 1.5);
+    // 2. Warm bounce off the floor plates, upward onto the underside of everything. Warm
+    //    on purpose and at low amplitude - see LIGHT_RIG for why the amplitude is capped.
+    this.bounceLight = new PointLight(rigColour(LIGHT_RIG.bounce), 9, 34, 1.5);
         // Lifted well clear of the plates: at 0.4m an inverse-square falloff blew the floor
     // directly beneath it to pure white, which is the one thing the value structure forbids
     // outside a named light source.
@@ -453,7 +491,7 @@ export class Playfield implements Tickable, Disposable {
     this.root.add(this.ballLight);
 
     // 4. Ambient floor fill, keeping shadow sides readable without lifting the black point.
-    const fill = new PointLight(new Color(0.80, 0.86, 0.96), 7.0, 64, 1.5);
+    const fill = new PointLight(rigColour(LIGHT_RIG.fill), 7.0, 64, 1.5);
     fill.position.set(0, 1.2, -3);
     this.root.add(fill);
 
@@ -1059,6 +1097,20 @@ export class Playfield implements Tickable, Disposable {
     return this.fx.phase;
   }
 
+  /**
+   * Corridor dimensions, so a gate can derive its sample points from the geometry the
+   * game actually built instead of re-declaring the numbers and drifting from them.
+   */
+  get corridorDims(): CorridorDims {
+    return {
+      halfWidth: TUNING.corridorHalfWidth,
+      halfHeight: TUNING.corridorHalfHeight,
+      ringSpacing: TUNING.ringSpacing,
+      paneWidth: TUNING.paneWidth,
+      paneHeight: TUNING.paneHeight,
+    };
+  }
+
   /** Live breakable panes on the field. */
   get paneCount(): number {
     let n = 0;
@@ -1164,6 +1216,11 @@ export class Playfield implements Tickable, Disposable {
     for (const target of this.targets) { target.live = false; target.mesh.visible = false; }
     for (const pool of this.caustics) pool.visible = false;
     this.fx.reset();
+    this.rng = createRng(this.rng.seed);
+    // The treadmill offset. Without this the shell stays wherever it had scrolled to, so a
+    // restart puts the ring joints, pilasters and light strips at a different screen
+    // position every time and no two captures of "the same" seed match.
+    this.shell.position.z = 0;
 
     this.ballsLeft = BALLS_AT_START;
     this.score = 0;

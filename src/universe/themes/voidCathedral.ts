@@ -49,7 +49,12 @@ export const VOID_CATHEDRAL: UniverseTheme = defineTheme({
   emissive: { primary: srgb('#7fdfff'), secondary: srgb('#eaf4ff') },
 
   metal: srgb('#9aa3a8'),
-  stone: srgb('#b9bcb6'),
+  // TRUE neutral. The old 185,188,182 was faintly warm-green (+0.0054) and read khaki once
+  // the bounce hit it; over-correcting to 182,188,194 then made the whole corridor blue at
+  // 0.155 saturation. The surface carries no temperature at all - the LIGHTS carry it, which
+  // is the law this universe is the reference for. Cool comes from the key, warm from the
+  // bounce, and neither is baked into the albedo where it cannot be relit.
+  stone: srgb('#767880'),
   kit: 'kit-rectilinear-void',
 
   // Warm shadows against cool highlights - the gentlest split in the set, because a strong

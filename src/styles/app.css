@@ -356,33 +356,43 @@
 .fx__grain { z-index: 4; }
 
 /*
- * VIGNETTE -- the frame's whole black point, in one layer.
+ * VIGNETTE -- the corner falloff, layered under the optical one in render/VignetteNode.ts.
  *
- * Hand-rolled here rather than in TSL because r185 ships no VignetteNode and a radial
- * darkening of the final image is exactly what a composited gradient is for.
+ * A composited gradient rather than the whole effect in TSL, now that render/VignetteNode.ts
+ * exists and owns the optical falloff. This layer only touches the extreme corners.
  *
  * Ellipse, not farthest-side: on 16:9 a circular stop reaches the short edge first and
- * crushes top and bottom while the sides stay lit. The radii are deliberately under 2/3 --
- * an ellipse sized to the frame leaves the mid-edges (top-centre, left-centre) sitting in
- * the transparent zone, which is what held the edge band at 7% while the corners were
- * already black. Nothing starts before 72%, so the centre third of the frame, where the
- * reticle and the next pane always are, is untouched.
+ * crushes top and bottom while the sides stay lit. The radii are now 72%x74% - the old
+ * 58%x60% put the mid-edges deep inside the ramp, which is what turned the falloff into a
+ * band. Nothing starts before 64% and nothing reaches opaque, so the centre of the frame,
+ * where the reticle and the next pane always are, is untouched and the corner still reads
+ * as light falling off rather than as a mask laid over the picture.
  *
- * The stops are the composite of the two gradients this replaces, evaluated at matching
- * radii -- the old vignette and the old crush shared a centre and their aspect ratios
- * differed by one part in three hundred, so their product is expressible as one curve.
- * That is what makes this a reordering rather than a retune: at `--fx-vignette: 1` the
- * falloff is the one that shipped, only now nothing paints additively on top of it.
+ * THE STOPS WERE RE-AUTHORED AFTER DEVICE FEEDBACK. They used to be the composite of the
+ * old vignette and the old crush, which together reached rgb(0 0 0 / 1) - OPAQUE BLACK - by
+ * 100% and 0.87 by 88%, inside an ellipse only 58%x60% of the frame. That is not a falloff,
+ * it is a matte, and on a real OnePlus 12 it read as a thick flat picture-frame border that
+ * flattened the depth the corridor spends its whole geometry budget creating.
+ *
+ * It also stacked on top of render/VignetteNode.ts, which applies its own falloff PRE-tone-
+ * map on linear HDR - the physically correct place, since real vignetting attenuates light
+ * before the sensor responds to it. Two vignettes were compositing one effect, and the one
+ * doing most of the darkening was the one in the wrong colour space: a post-tonemap matte
+ * subtracts display values and reads as paint, where a pre-tonemap multiply reads as light.
+ *
+ * So the optical falloff - the wide, gentle part - now lives in the TSL node, and this
+ * layer is confined to a NARROW dark rim: nothing before 84% of the ellipse, which puts
+ * the inner 88% of the frame width untouched. Whether two layers should exist at all is a
+ * question for the per-pass timing in stage 6, not one to answer by guessing here.
  */
 .fx__vignette {
   background: radial-gradient(
-    ellipse 58% 60% at 50% 47%,
+    ellipse 53% 53% at 50% 47%,
     transparent 0%,
-    transparent 72%,
-    rgb(2 4 7 / 0.34) 78%,
-    rgb(1 2 4 / 0.66) 84%,
-    rgb(0 0 0 / 0.87) 88%,
-    rgb(0 0 0 / 0.99) 92%,
+    transparent 88%,
+    rgb(2 4 7 / 0.45) 92%,
+    rgb(1 2 4 / 0.86) 94%,
+    rgb(0 0 0 / 0.97) 96%,
     rgb(0 0 0 / 1) 100%
   );
   opacity: var(--fx-vignette);

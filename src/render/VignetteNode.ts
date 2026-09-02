@@ -40,7 +40,7 @@ export const VIGNETTE_SHAPE = Object.freeze({
    */
   centreBiasY: 0.06,
   /** Width of the falloff ramp, in the same normalised frame units as `radius`. */
-  softness: 0.42,
+  softness: 0.6,
   /**
    * ELLIPTICAL falloff. A circular vignette on a 16:9 frame reaches the short edge long
    * before the long one, so the top and bottom crush while the sides stay lit. Weighting
@@ -51,13 +51,17 @@ export const VIGNETTE_SHAPE = Object.freeze({
   /**
    * Hard ceiling on how much light the vignette may remove.
    *
-   * This was 0.30, on the stated grounds that "the ball count lives in a corner and must
-   * stay readable". That reasoning was wrong: the ball count is in the DOM overlay, which
-   * composites ON TOP of the canvas and is not touched by this node at all. The constraint
-   * it was protecting does not exist, and paying 70% corner luminance for it was what kept
-   * the frame edges at 10% luma when the value structure calls for under 6%.
+   * This was 0.30, then 0.97, and 0.97 was wrong. The argument for raising it was that the
+   * ball count lives in the DOM overlay and is not touched by this node, so nothing needed
+   * protecting and the frame edges could go under 6% luma as the value structure asks. Both
+   * halves were true and the conclusion still produced a defect: at 0.97, with strength 0.95
+   * and a falloff starting at 0.42, everything outside a small central ellipse was crushed to
+   * near-black and the result read on device as a flat picture-frame border - letterboxing,
+   * not optics. A real lens loses roughly 40% at the corners and does it as a GRADIENT. 6%
+   * edge luma is reachable; it just must not be reached with a hard band a quarter of the
+   * frame wide.
    */
-  maxCornerAlpha: 0.97,
+  maxCornerAlpha: 0.6,
 });
 
 export interface VignetteUniforms {

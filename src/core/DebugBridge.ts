@@ -20,6 +20,15 @@ import type { PostEffect } from './Quality';
 /** Kinds a gate may ask the field to place in isolation. */
 export type DebugPlaceKind = 'pane' | 'decorative' | 'crystal';
 
+/** The corridor's built dimensions, in metres. Read by gates that derive sample points. */
+export interface CorridorDims {
+  readonly halfWidth: number;
+  readonly halfHeight: number;
+  readonly ringSpacing: number;
+  readonly paneWidth: number;
+  readonly paneHeight: number;
+}
+
 export interface DebugSnapshot {
   readonly ready: boolean;
   /** 'idle' | 'flash' | 'hitstop' | 'release' */
@@ -51,11 +60,13 @@ export interface DebugSnapshot {
   readonly pipelines: number;
   readonly score: number;
   readonly multiplier: number;
+  readonly corridor: CorridorDims;
 }
 
 /** The subset of Playfield the bridge needs. Declared structurally to avoid a cycle. */
 export interface DebugField {
   readonly shatterPhase: string;
+  readonly corridorDims: CorridorDims;
   readonly balls_: number;
   readonly approach: number;
   readonly isTutorial: boolean;
@@ -166,6 +177,7 @@ export function installDebugBridge(deps: BridgeDeps): DebugBridge {
             ?.pipelines ?? 0,
         score: deps.field.scoreValue,
         multiplier: deps.field.multiplierValue,
+        corridor: deps.field.corridorDims,
       };
     },
 

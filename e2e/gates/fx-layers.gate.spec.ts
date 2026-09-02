@@ -53,6 +53,19 @@ const MAX_EDGE_PCT = 6;
 const MAX_CORNER_PCT = 6;
 const MIN_EDGE_DARK_PCT = 57;
 
+/**
+ * BOOT IS NOT A FIXED NUMBER OF FRAMES, so freeze() alone does not pin the picture. The
+ * corridor has travelled a different distance every run by the time it lands, and three
+ * consecutive runs of this file on identical source measured the edge band at 3.96%, then
+ * 6.65%, then failed - a 2.7pp spread on a law with a 6% ceiling. A gate whose own noise is
+ * half its budget cannot tell a regression from a re-run.
+ *
+ * restart() resets the field to the seed, and a fixed count of fixed steps then advances it
+ * deterministically. Same source, same picture, every time.
+ */
+const COMPOSITION_STEPS = 90;
+const FIXED_STEP_MS = 16;
+
 interface Metrics {
   /** Mean luminance of the outer EDGE_BAND ring, in percent. */
   edgePct: number;
@@ -372,6 +385,24 @@ test.describe('@fx', () => {
     await game.boot({ seed: 20260902, universe: 'void-cathedral' });
     await game.hideHud();
     await game.freeze();
+    // CSS animations are not the rAF and freeze() does not touch them. `.fx__grain` steps
+    // every 900ms and `.fx__scanlines` drifts continuously, so each screenshot caught a
+    // different grain phase and the edge dark-share swung 54.7%-63.7% on identical source.
+    // `animation: none` pins every layer to its base keyframe - the layers still paint and
+    // are still measured, they just stop moving under the camera.
+    await game.page.addStyleTag({
+      content: "*,*::before,*::after{animation:none!important;transition:none!important}",
+    });
+    // Pin the picture - see COMPOSITION_STEPS.
+    await game.page.evaluate(
+      ({ steps, dt }) => {
+        const sp = window.__sp!;
+        sp.restart();
+        for (let i = 0; i < steps; i += 1) sp.step(dt);
+      },
+      { steps: COMPOSITION_STEPS, dt: FIXED_STEP_MS },
+    );
+
 
     const shipped = await capture(game.page);
     const full = measure(shipped);
