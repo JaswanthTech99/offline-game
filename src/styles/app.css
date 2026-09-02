@@ -137,6 +137,50 @@
   pointer-events: auto;
 }
 
+/*
+  The boot icon. Inlined into index.html rather than fetched, so it is fully drawn in the
+  first painted frame - a fetched icon flashes an empty box at exactly the moment the veil
+  exists to look composed.
+
+  96px on the 1920 design width (5vw lands there exactly), floored at 64px so it does not
+  vanish on a phone. Centred on the wordmark's own axis; the rule and the status line are
+  untouched.
+*/
+.boot__icon {
+  inline-size: clamp(64px, 5vw, 96px);
+  block-size: auto;
+  /* Leads the wordmark by one stagger step: the icon arrives, the word follows. */
+  animation:
+    boot-icon-in var(--dur-scene) var(--e-spring-soft) both,
+    boot-icon-breathe 4200ms ease-in-out 900ms infinite;
+  /* transform and opacity only - the veil reports on the very thread it animates against. */
+  will-change: transform, opacity;
+}
+
+@keyframes boot-icon-in {
+  from {
+    opacity: 0;
+    transform: scale(0.86);
+    filter: blur(10px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+    filter: blur(0);
+  }
+}
+
+/* Its own period, matching the idle-layer rule: nothing in this project pulses in sync. */
+@keyframes boot-icon-breathe {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.82; }
+}
+
+/* The wordmark follows one step behind the icon. */
+.boot__word {
+  animation: boot-icon-in var(--dur-scene) var(--e-spring-soft) 90ms both;
+}
+
 .boot__word {
   margin: 0;
   font-size: clamp(22px, 5vw, 38px);
@@ -565,11 +609,25 @@
  * Emitted against the media query AND an explicit attribute, so the preference can be set
  * in-game by a player whose OS was never told, and so it applies before any JS has run.
  */
+/*
+  Reduced motion stops every loop dead and lands on the COMPOSED frame - the boot icon at
+  full opacity and full scale, never caught mid-entrance. Both spellings are needed: the OS
+  preference, and the [data-motion] attribute the engine writes when the player sets it in
+  game rather than in the OS.
+*/
 @media (prefers-reduced-motion: reduce) {
   .fx__scanlines,
   .fx__grain,
   .boot__bar::after {
     animation: none !important;
+  }
+
+  .boot__icon,
+  .boot__word {
+    animation: none !important;
+    opacity: 1;
+    transform: none;
+    filter: none;
   }
 }
 
@@ -577,4 +635,12 @@
 [data-motion='reduced'] .fx__grain,
 [data-motion='reduced'] .boot__bar::after {
   animation: none !important;
+}
+
+[data-motion='reduced'] .boot__icon,
+[data-motion='reduced'] .boot__word {
+  animation: none !important;
+  opacity: 1;
+  transform: none;
+  filter: none;
 }

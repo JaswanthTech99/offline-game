@@ -16,16 +16,27 @@ export default defineConfig({
     wasm(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['favicon.svg'],
+      includeAssets: ['icon.svg', 'icons/*.png'],
       manifest: {
         name: 'SHATTERPOINT',
         short_name: 'Shatterpoint',
         description: 'First-person on-rails corridor runner.',
-        theme_color: '#05070b',
-        background_color: '#05070b',
+        // Both are the plate's own darkest stop (#04040c, the outer ring of plateGround).
+        // A browser-generated splash that flashes a different colour than the boot veil is
+        // the most visible seam an installed PWA has, and it is free to avoid.
+        theme_color: '#04040c',
+        background_color: '#04040c',
         display: 'fullscreen',
         orientation: 'landscape',
-        icons: [],
+        // Installability requires BOTH a 192 and a 512. Chrome additionally wants at least
+        // one maskable icon or it warns; shipping only maskable makes desktop render the
+        // art inside a mask it does not need, so both purposes are declared explicitly.
+        icons: [
+          { src: 'icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+          { src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+          { src: 'icons/icon-maskable-192.png', sizes: '192x192', type: 'image/png', purpose: 'maskable' },
+          { src: 'icons/icon-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+        ],
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,wasm,ktx2,glb,opus,cube}'],

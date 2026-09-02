@@ -18,7 +18,9 @@
     "test:gates": "playwright test e2e/gates",
     "test:visual": "playwright test e2e/visual",
     "export:4k": "playwright test e2e/gates/export4k.spec.ts --grep @export4k",
-    "report": "playwright show-report e2e-report"
+    "report": "playwright show-report e2e-report",
+    "icons": "node tools/icon-variants.mjs && node tools/icon-render.mjs",
+    "icons:gate": "node tools/icon-gate.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "0.20.0",

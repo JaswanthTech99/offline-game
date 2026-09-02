@@ -1,0 +1,277 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<!--
+  SHATTERPOINT - app icon. The fracture spells S J: hidden at a glance,
+  legible once you look at it.
+
+  The craft note that matters most: a crack in glass is not a white line. It is a
+  DARK FISSURE with BRIGHT LIPS, because light catches the two fracture walls and
+  the gap between them stays dark. Every earlier attempt here drew white strokes
+  and that is why they read as drawn-on rather than broken. Each run below is
+  painted in four passes - cyan bleed, dark fissure, lit lip offset up-left
+  toward the key, faint counter-lip down-right from the fill light.
+
+  Depth comes from: a slab back face offset behind the front face so the glass
+  has thickness, ambient occlusion pooled inside the hull edge, a bevelled plate
+  with a bright top-left inset and a dark bottom-right one, and a glossy sheen
+  sweep. Two lights, not one - cool key upper-left, violet fill lower-right - so
+  the form is carried by hue as well as value.
+
+  Letter runs are the widest band, because the brief is "visible if you look".
+  Distractors are routed clear of both letter cores rather than across them.
+-->
+<defs>
+  <clipPath id="plate"><rect width="1024" height="1024" rx="228" ry="228"/></clipPath>
+
+  <!-- hull, reused for clipping the AO and the internal facets -->
+  <clipPath id="hullClip">
+    <polygon points="418,150 776,254 866,566 668,876 336,844 172,552 236,296"/>
+  </clipPath>
+
+  <radialGradient id="plateGround" cx="34%" cy="20%" r="96%">
+    <stop offset="0"   stop-color="#1c4a66"/>
+    <stop offset=".34" stop-color="#0d2438"/>
+    <stop offset=".68" stop-color="#0a1024"/>
+    <stop offset="1"   stop-color="#04040c"/>
+  </radialGradient>
+
+  <radialGradient id="violetFill" cx="78%" cy="86%" r="60%">
+    <stop offset="0"   stop-color="#7b4ad6" stop-opacity=".34"/>
+    <stop offset="1"   stop-color="#7b4ad6" stop-opacity="0"/>
+  </radialGradient>
+
+  <radialGradient id="keyPool" cx="46%" cy="30%" r="52%">
+    <stop offset="0"   stop-color="#8ff0ff" stop-opacity=".5"/>
+    <stop offset="1"   stop-color="#8ff0ff" stop-opacity="0"/>
+  </radialGradient>
+
+  <!-- front face of the slab -->
+  <linearGradient id="faceMain" x1=".06" y1="0" x2=".9" y2="1">
+    <stop offset="0"   stop-color="#f4feff" stop-opacity=".95"/>
+    <stop offset=".22" stop-color="#b6e8f8" stop-opacity=".85"/>
+    <stop offset=".52" stop-color="#4e9cbe" stop-opacity=".72"/>
+    <stop offset=".8"  stop-color="#1d4f70" stop-opacity=".78"/>
+    <stop offset="1"   stop-color="#0b2138" stop-opacity=".9"/>
+  </linearGradient>
+
+  <!-- facet planes, each a distinct value so the body reads as cut glass -->
+  <linearGradient id="facetTop" x1=".2" y1="0" x2=".8" y2="1">
+    <stop offset="0" stop-color="#ffffff" stop-opacity=".5"/>
+    <stop offset="1" stop-color="#8fd8ee" stop-opacity=".08"/>
+  </linearGradient>
+  <linearGradient id="facetRight" x1="1" y1=".1" x2="0" y2="1">
+    <stop offset="0" stop-color="#a97cf0" stop-opacity=".26"/>
+    <stop offset="1" stop-color="#0a2130" stop-opacity=".34"/>
+  </linearGradient>
+  <linearGradient id="facetLow" x1=".5" y1="1" x2=".5" y2="0">
+    <stop offset="0" stop-color="#03101c" stop-opacity=".6"/>
+    <stop offset="1" stop-color="#2f7ea0" stop-opacity=".18"/>
+  </linearGradient>
+
+  <!-- the slab's side, seen because the front face is offset off it -->
+  <linearGradient id="slabSide" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#1a5c7d"/>
+    <stop offset="1" stop-color="#04121e"/>
+  </linearGradient>
+
+  <linearGradient id="chip" x1="1" y1="0" x2="0" y2="1">
+    <stop offset="0"   stop-color="#e8fbff" stop-opacity=".92"/>
+    <stop offset=".55" stop-color="#5aa8c8" stop-opacity=".6"/>
+    <stop offset="1"   stop-color="#06161f" stop-opacity=".9"/>
+  </linearGradient>
+
+  <linearGradient id="sheen" x1=".1" y1="0" x2=".7" y2="1">
+    <stop offset="0"   stop-color="#ffffff" stop-opacity=".2"/>
+    <stop offset=".45" stop-color="#ffffff" stop-opacity=".05"/>
+    <stop offset="1"   stop-color="#ffffff" stop-opacity="0"/>
+  </linearGradient>
+
+  <linearGradient id="bevelHi" x1="0" y1="0" x2=".6" y2="1">
+    <stop offset="0"   stop-color="#c8f4ff" stop-opacity=".85"/>
+    <stop offset=".55" stop-color="#c8f4ff" stop-opacity=".12"/>
+    <stop offset="1"   stop-color="#c8f4ff" stop-opacity="0"/>
+  </linearGradient>
+  <linearGradient id="bevelLo" x1="1" y1="1" x2=".3" y2="0">
+    <stop offset="0"   stop-color="#000000" stop-opacity=".75"/>
+    <stop offset=".5"  stop-color="#000000" stop-opacity=".18"/>
+    <stop offset="1"   stop-color="#000000" stop-opacity="0"/>
+  </linearGradient>
+
+  <filter id="bigBloom" x="-70%" y="-70%" width="240%" height="240%">
+    <feGaussianBlur stdDeviation="26"/>
+  </filter>
+  <filter id="crackBleed" x="-70%" y="-70%" width="240%" height="240%">
+    <feGaussianBlur stdDeviation="7"/>
+  </filter>
+  <filter id="aoBlur" x="-30%" y="-30%" width="160%" height="160%">
+    <feGaussianBlur stdDeviation="16"/>
+  </filter>
+  <filter id="coreBurst" x="-140%" y="-140%" width="380%" height="380%">
+    <feGaussianBlur stdDeviation="22"/>
+  </filter>
+  <filter id="grain" x="0" y="0" width="100%" height="100%">
+    <feTurbulence type="fractalNoise" baseFrequency=".9" numOctaves="2" stitchTiles="stitch"/>
+    <feColorMatrix type="saturate" values="0"/>
+  </filter>
+
+  <!-- ============ THE FRACTURE NETWORK ============
+       Band A: the two letterforms, widest, radiating from the strike.
+       Band B: mid-distance runs, routed clear of the letter cores.
+       Band C: fine runs reaching the hull. -->
+
+  <g id="letters" fill="none" stroke-linecap="butt" stroke-linejoin="miter">
+    <!-- S: top bar, shoulder, waist diagonal, lower bowl, bottom bar. One gap,
+         at the shoulder, where closure repairs it most willingly. -->
+    <path d="M596 288 L 520 338 L 438 306 L 352 330 L 332 388"/>
+    <path d="M346 424 L 372 438 L 452 474 L 498 528 L 494 592 L 446 636 L 366 650 L 312 620"/>
+    <!-- J: flag, stem, hook. One gap, mid stem. -->
+    <path d="M614 284 L 676 306 L 752 320 L 748 466"/>
+    <path d="M744 506 L 738 566 L 712 628 L 652 656 L 600 630 L 592 588"/>
+  </g>
+
+  <g id="midRuns" fill="none" stroke-linecap="butt" stroke-linejoin="miter">
+    <path d="M604 306 L 592 392 L 556 452"/>
+    <path d="M332 388 L 262 372"/>
+    <path d="M748 466 L 812 448"/>
+    <path d="M446 636 L 424 704"/>
+    <path d="M652 656 L 668 722"/>
+    <path d="M556 452 L 540 520 L 566 566"/>
+  </g>
+
+  <g id="fineRuns" fill="none" stroke-linecap="butt" stroke-linejoin="miter">
+    <path d="M262 372 L 190 400"/>
+    <path d="M352 330 L 312 268 L 258 212"/>
+    <path d="M676 306 L 644 258 L 618 190"/>
+    <path d="M812 448 L 862 466"/>
+    <path d="M738 566 L 798 596 L 844 660"/>
+    <path d="M424 704 L 396 796 L 384 846"/>
+    <path d="M668 722 L 690 814"/>
+    <path d="M312 620 L 236 596 L 196 566"/>
+    <!-- lower-left was a blank quadrant; these carry the network into it -->
+    <path d="M366 650 L 344 726 L 312 812"/>
+    <path d="M446 636 L 470 712 L 462 800 L 466 856"/>
+    <path d="M344 726 L 262 744"/>
+    <path d="M592 588 L 552 552"/>
+    <path d="M596 288 L 588 186"/>
+  </g>
+</defs>
+
+<!--
+  GENERATED by tools/icon-variants.mjs from icon.svg. Do not edit.
+
+  SQUARE. Transparent, no plate, no bevel: Windows, Tauri and Steam apply their own
+  container shape and a baked plate double-rounds. Art is scaled to 1.12 to reclaim the
+  padding the plate used to occupy.
+-->
+<g transform="translate(-61.440000000000055 -61.440000000000055) scale(1.12)">
+
+  <!-- ============ PLATE ============ -->
+  <!-- suspended chips, small, off-axis -->
+  <g fill="#8fdcf5" opacity=".22">
+    <polygon points="180,318 224,296 214,340 186,352"/>
+    <polygon points="856,352 896,336 886,378 862,386"/>
+    <polygon points="240,772 284,792 258,816 236,800"/>
+    <polygon points="146,540 180,522 176,562 152,566"/>
+  </g>
+
+  <g transform="rotate(-7 512 512)">
+
+    <!-- bloom behind the slab -->
+    <g filter="url(#bigBloom)" opacity=".5">
+      <polygon fill="#4fc4e8" points="418,150 776,254 866,566 668,876 336,844 172,552 236,296"/>
+    </g>
+
+    <!-- SLAB SIDE: the same hull offset, so the front face sits on thickness -->
+    <polygon fill="url(#slabSide)" transform="translate(11 15)"
+      points="418,150 776,254 866,566 668,876 336,844 172,552 236,296"/>
+
+    <!-- FRONT FACE -->
+    <polygon fill="url(#faceMain)"
+      points="418,150 776,254 866,566 668,876 336,844 172,552 236,296"/>
+
+    <g clip-path="url(#hullClip)">
+      <!-- facet planes -->
+      <polygon fill="url(#facetTop)"   points="418,150 776,254 512,512 236,296"/>
+      <polygon fill="url(#facetRight)" points="776,254 866,566 668,876 512,512"/>
+      <polygon fill="url(#facetLow)"   points="336,844 172,552 512,512"/>
+      <polygon fill="#0a2431" opacity=".2" points="172,552 236,296 512,512"/>
+
+      <!-- facet seams, finer than any crack so the two never confuse -->
+      <g stroke="#a8e4f6" stroke-width="3" stroke-opacity=".3" fill="none">
+        <path d="M418 150 L 512 512 L 776 254"/>
+        <path d="M172 552 L 512 512 L 336 844"/>
+        <path d="M512 512 L 866 566"/>
+        <path d="M236 296 L 512 512"/>
+      </g>
+
+      <!-- ambient occlusion pooled inside the hull edge -->
+      <polygon fill="none" stroke="#020a12" stroke-width="38" stroke-opacity=".4"
+        filter="url(#aoBlur)"
+        points="418,150 776,254 866,566 668,876 336,844 172,552 236,296"/>
+
+      <!-- glossy sheen sweep, upper-left, the app-icon gloss -->
+      <path fill="url(#sheen)" d="M170 150 L 700 150 L 300 700 L 170 640 Z"/>
+    </g>
+
+    <!-- hull edges: bright where the key hits, dark on the fill side -->
+    <polyline fill="none" stroke="#e8fdff" stroke-width="9" stroke-opacity=".9" stroke-linejoin="round"
+      points="336,844 172,552 236,296 418,150 776,254"/>
+    <polyline fill="none" stroke="#7fd0ea" stroke-width="8" stroke-opacity=".45" stroke-linejoin="round"
+      points="776,254 866,566 668,876 336,844"/>
+
+    <!-- voids: pieces gone, in the hull corners, clear of both letters -->
+    <g fill="#01050a">
+      <polygon points="238,306 302,272 288,340 226,356"/>
+      <polygon points="642,742 700,756 676,798 640,784"/>
+    </g>
+    <g fill="none" stroke="#bff0ff" stroke-width="5" stroke-opacity=".8">
+      <polygon points="238,306 302,272 288,340 226,356"/>
+      <polygon points="642,742 700,756 676,798 640,784"/>
+    </g>
+
+    <!-- ============ CRACKS, FOUR PASSES PER BAND ============
+         1 cyan bleed  2 dark fissure  3 lit lip toward the key (up-left)
+         4 faint counter-lip from the violet fill (down-right)              -->
+    <g clip-path="url(#hullClip)">
+      <!-- 1 bleed -->
+      <use href="#letters"  stroke="#6ee7ff" stroke-width="26" opacity=".42" filter="url(#crackBleed)"/>
+      <use href="#midRuns"  stroke="#6ee7ff" stroke-width="17" opacity=".34" filter="url(#crackBleed)"/>
+      <use href="#fineRuns" stroke="#6ee7ff" stroke-width="11" opacity=".24" filter="url(#crackBleed)"/>
+
+      <!-- 2 fissure -->
+      <use href="#letters"  stroke="#020a12" stroke-width="15" opacity=".92"/>
+      <use href="#midRuns"  stroke="#020a12" stroke-width="10" opacity=".88"/>
+      <use href="#fineRuns" stroke="#020a12" stroke-width="6.5" opacity=".82"/>
+
+      <!-- 3 lit lip -->
+      <g transform="translate(-3 -3.4)">
+        <use href="#letters"  stroke="#ffffff" stroke-width="6"   opacity=".97"/>
+        <use href="#midRuns"  stroke="#f0fcff" stroke-width="4"   opacity=".9"/>
+        <use href="#fineRuns" stroke="#d6f4ff" stroke-width="2.6" opacity=".82"/>
+      </g>
+
+      <!-- 4 counter-lip -->
+      <g transform="translate(2.6 3)">
+        <use href="#letters"  stroke="#b98cf5" stroke-width="3.4" opacity=".5"/>
+        <use href="#midRuns"  stroke="#b98cf5" stroke-width="2.4" opacity=".38"/>
+      </g>
+    </g>
+
+    <!-- ============ STRIKE ============ -->
+    <circle cx="604" cy="286" r="130" fill="#6ee7ff" opacity=".26" filter="url(#coreBurst)"/>
+    <!-- irregular flare. Concentric rings plus four even rays read as a
+         targeting reticle, which is UI, not damage. -->
+    <polygon fill="#ffffff" opacity=".95" points="592,268 618,276 622,300 596,308 582,288"/>
+    <g stroke="#ffffff" stroke-width="3" stroke-linecap="butt" opacity=".55">
+      <path d="M604 250 L 606 268"/><path d="M628 292 L 650 296"/>
+    </g>
+
+    <!-- detached chips, with their own edge light -->
+    <g stroke="#d6f6ff" stroke-width="6" stroke-linejoin="round">
+      <polygon fill="url(#chip)" points="752,700 830,740 786,788 756,744"/>
+      <polygon fill="url(#chip)" opacity=".8" points="886,596 938,624 906,660 884,634"/>
+    </g>
+  </g>
+
+  
+</g>
+</svg>
