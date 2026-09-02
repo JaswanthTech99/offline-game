@@ -9,7 +9,7 @@
  *   node tools/serve-apk.mjs [port]
  */
 import { createServer } from 'node:http';
-import { readFile, stat } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { join, resolve, dirname, extname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
