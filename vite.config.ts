@@ -15,6 +15,13 @@ export default defineConfig({
     tailwindcss(),
     wasm(),
     VitePWA({
+      /**
+       * The service worker is a liability inside a WebView: Capacitor serves from
+       * https://localhost, so the SW installs and then serves a cached build back on the
+       * next launch - which means a freshly installed APK can show yesterday's bundle.
+       * SP_MOBILE=1 turns it off for the Android wrapper only; the web build keeps it.
+       */
+      disable: process.env['SP_MOBILE'] === '1',
       registerType: 'autoUpdate',
       includeAssets: ['icon.svg', 'icons/*.png'],
       manifest: {
@@ -55,7 +62,10 @@ export default defineConfig({
   preview: { host: '0.0.0.0', port: 59593, strictPort: true },
   build: {
     target: 'esnext',
-    sourcemap: true,
+    // Sourcemaps are 9 MB of a 12 MB APK. The web build keeps them - they are how a bug
+    // report from a browser is readable - but a phone test build does not need to carry
+    // three megabytes of Rapier's map over USB on every install.
+    sourcemap: process.env['SP_MOBILE'] !== '1',
     rollupOptions: {
       output: {
         manualChunks(id: string) {

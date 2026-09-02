@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">SHATTERPOINT</string>
+    <string name="title_activity_main">SHATTERPOINT</string>
+    <string name="package_name">com.jaswanthtech.shatterpoint</string>
+    <string name="custom_url_scheme">com.jaswanthtech.shatterpoint</string>
+</resources>

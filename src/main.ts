@@ -97,8 +97,17 @@ function presetFor(tier: Tier): string {
 }
 
 /** `?tier=MOBILE_LOW` forces the GRAPHICS axis only; motion still follows the OS. */
+/**
+ * The tier override, in priority order: the URL, then a build-time meta tag.
+ *
+ * The meta tag exists for the Android wrapper, which has no address bar - a WebView cannot
+ * be handed a query string, so the packaged build states its intent in the document instead.
+ */
 function tierOverrideFrom(params: URLSearchParams): Tier | null {
-  const raw = params.get('tier');
+  const raw =
+    params.get('tier') ??
+    document.querySelector('meta[name="sp-tier"]')?.getAttribute('content') ??
+    null;
   if (raw === null) return null;
   const wanted = raw.toUpperCase().replaceAll('-', '_');
   return TIERS.find((tier) => tier === wanted) ?? null;
@@ -587,10 +596,20 @@ async function boot(shell: Shell): Promise<App> {
     });
   });
 
-  hud.setLegend([
-    { keys: 'Click', action: 'throw' },
-    { keys: 'Space', action: 'throw at reticle' },
-  ]);
+  // A touch device is told to tap, not to click. The legend is the only instruction the
+  // game gives, so naming the wrong gesture is the whole tutorial being wrong.
+  const touchFirst = engine.caps.hasTouch && engine.caps.hasCoarsePointer;
+  hud.setLegend(
+    touchFirst
+      ? [
+          { keys: 'Tap', action: 'throw' },
+          { keys: 'Hold', action: 'aim' },
+        ]
+      : [
+          { keys: 'Click', action: 'throw' },
+          { keys: 'Space', action: 'throw at reticle' },
+        ],
+  );
 
   // Compile the whole node graph BEFORE the first presented frame. Without this the
   // seventeen-stage TSL chain compiles lazily inside the frames the player is watching,

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        The plate's own darkest stop, shared with the manifest theme, the PWA theme_color
+        and the boot veil's background, so no stage of launch flashes a different colour
+        than the next.
+    -->
+    <color name="spGround">#04040C</color>
+    <color name="colorPrimary">#04040C</color>
+    <color name="colorPrimaryDark">#04040C</color>
+    <color name="colorAccent">#6EE7FF</color>
+</resources>

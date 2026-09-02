@@ -25,3 +25,11 @@ credentials-*
 !.vscode/settings.json
 .DS_Store
 Thumbs.db
+
+# capacitor / android build output
+android/app/build/
+android/build/
+android/.gradle/
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+android/local.properties
